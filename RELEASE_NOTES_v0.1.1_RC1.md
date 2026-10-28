@@ -1,6 +1,6 @@
-# RELEASE_NOTES_v1.0_RC1.md
+# RELEASE_NOTES_v0.1.1_RC1.md
 
-# Jiansz v1.0 RC1
+# Jiansz v0.1.1 RC1
 
 首次公开测试版。
 

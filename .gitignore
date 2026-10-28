@@ -45,3 +45,7 @@ Desktop.ini
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Obsolete card layout tuning artifacts
+card_layout_debug.json
+config/card_layout_debug.json

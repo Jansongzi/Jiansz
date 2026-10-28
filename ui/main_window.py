@@ -5,8 +5,6 @@ from core import *
 import random
 import re
 import json
-from ui.cards import CardPanel
-from ui.card_scene import CardSceneWidget, _pose_from_dict
 from PySide6.QtCore import (
     QPropertyAnimation, QParallelAnimationGroup, QSequentialAnimationGroup,
     QEasingCurve, QRect, QRectF, QDateTime, QSize, Signal, QEvent, Property, QPointF
@@ -80,9 +78,7 @@ class DashboardBannerWidget(QFrame):
         base = app_dir()
         candidates.extend([
             base / "assets" / "banner" / "banner.jpg",
-            base / "assets" / "banner.jpg",
             base / "assets" / "banner" / "banner.png",
-            Path(r"C:\Users\Jiansonze\Pictures\Saved Pictures\IMG_20260822_200452.jpg"),
         ])
 
         for path in candidates:
@@ -854,7 +850,6 @@ class CustomTitleBar(QWidget):
         icon_candidates = [
             base / "assets" / "icon.ico",
             base / "icon.ico",
-            Path(r"C:\Users\Jiansonze\Pictures\图标\s2ryw-u10dx-001.ico"),
         ]
         for ip in icon_candidates:
             if ip and ip.exists():
@@ -1494,10 +1489,6 @@ class MainWindow(QMainWindow):
 
         self.export_config_button = QPushButton("导出配置")
         self.import_config_button = QPushButton("导入配置")
-        self.export_ui_params_button = QPushButton("导出UI参数")
-        self.import_ui_params_button = QPushButton("导入UI参数")
-        self.layout_tuner_button = QPushButton("布局调参")
-        self.layout_tuner_button.setVisible(False)
 
         preset_layout.addWidget(preset_label)
         preset_layout.addWidget(self.preset_combo, stretch=1)
@@ -2463,8 +2454,6 @@ class MainWindow(QMainWindow):
         self._setup_shortcuts()
         self.export_config_button.clicked.connect(self.export_config)
         self.import_config_button.clicked.connect(self.import_config)
-        self.export_ui_params_button.clicked.connect(self.export_ui_params)
-        self.import_ui_params_button.clicked.connect(self.import_ui_params)
         self.refresh_stats_button.clicked.connect(self.refresh_runtime_stats_view)
         self.open_stats_button.clicked.connect(lambda: self.open_directory(self.base_dir / "runtime_stats"))
         self.clear_log_button.clicked.connect(self.clear_log)
@@ -3185,7 +3174,6 @@ class MainWindow(QMainWindow):
             return
         self._update_status_view("运行中")
         self.set_status_character_state("work", force=True)
-        self.collapse_cards(animated=True)
         self.show_temporary_status_character_message("启动成功啦～接下来我会帮你盯着进度。", 10, priority=80)
 
     @Slot(str)
@@ -3270,7 +3258,6 @@ class MainWindow(QMainWindow):
             "auto_exit_checkbox", "auto_start_tasks_checkbox",
             "windows_startup_checkbox", "timeout_screenshot_checkbox",
             "export_config_button", "import_config_button",
-            "export_ui_params_button", "import_ui_params_button",
         ]
         for name in controls_disabled_when_running:
             w = getattr(self, name, None)
@@ -3384,15 +3371,6 @@ class MainWindow(QMainWindow):
             if idx >= 0:
                 self.theme_combo.setCurrentIndex(idx)
             self._applying_theme = False
-
-        # 同步卡片自绘用色和外部卡片美术资源。
-        if hasattr(self, "cards"):
-            large_card = self._existing_asset_path("cards", "large", "card_main.png")
-            small_card = self._existing_asset_path("cards", "small", "card_sub.png")
-            for card in self.cards.values():
-                card.set_visual_palette(pal["accent"], pal["panel"], pal["border"])
-                if hasattr(card, "set_card_assets"):
-                    card.set_card_assets(str(large_card) if large_card else None, str(small_card) if small_card else None)
 
         bg_path = self._existing_asset_path("bg", self._theme_asset_folder(theme), "bg_01.png")
         if hasattr(self, "root_widget") and hasattr(self.root_widget, "set_background_image"):
@@ -3575,53 +3553,6 @@ class MainWindow(QMainWindow):
                 background-color: {pal['select']};
                 color: #1A3865;
                 border-radius: 6px;
-            }}
-            QWidget#CardSceneWidget {{
-                background: transparent;
-            }}
-            QFrame#CardPanel {{
-                background: transparent;
-                border: none;
-            }}
-            QWidget#CardOverlay {{
-                background: transparent;
-            }}
-            QWidget#CardContent {{
-                background: transparent;
-            }}
-            QLabel#CardTitle {{
-                font-size: 21px;
-                font-weight: 800;
-                color: {pal['fg']};
-                background: transparent;
-                padding: 0px;
-                margin: 0px;
-            }}
-            QLabel#CardSubtitle, QLabel#CardPreview {{
-                color: {pal['muted']};
-                background: transparent;
-                line-height: 150%;
-            }}
-            QLabel#CardBadge {{
-                color: #FFFFFF;
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #4F7DF9, stop:1 #8862F2);
-                border: 1px solid rgba(255,255,255,140);
-                border-radius: 10px;
-                padding: 5px 12px;
-                font-weight: bold;
-                min-width: 52px;
-            }}
-            QPushButton#CardExitButton {{
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #FFFFFF, stop:1 #EAF1FB);
-                color: {pal['fg']};
-                border: 1px solid {pal['border']};
-                border-radius: 9px;
-                padding: 0px;
-                font-weight: bold;
-            }}
-            QPushButton#CardExitButton:hover {{
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #EAF1FB, stop:1 #D9E7FF);
-                border-color: {pal['accent']};
             }}
             QPushButton#TaskAdvancedToggleButton {{
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(255,255,255,230), stop:1 rgba(235,244,255,230));
@@ -3863,67 +3794,6 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._show_themed_message("导入失败", f"导入配置失败：{exc}", QMessageBox.Icon.Critical)
             self.append_log(f"导入配置失败：{exc}")
-
-    def _collect_ui_params(self) -> dict:
-        """收集卡片布局调参参数。"""
-        if not hasattr(self, "card_area"):
-            return {}
-        return {key: pose.__dict__.copy() for key, pose in self.card_area.overview_layout.items()}
-
-    def export_ui_params(self) -> None:
-        """导出卡片 UI 布局参数，供开发版调参复用。"""
-        try:
-            default_path = str(self.base_dir / "card_layout_debug.json")
-            path, _ = QFileDialog.getSaveFileName(
-                self,
-                "导出UI参数",
-                default_path,
-                "JSON 参数文件 (*.json);;所有文件 (*.*)",
-            )
-            if not path:
-                return
-            with Path(path).open("w", encoding="utf-8") as f:
-                json.dump(self._collect_ui_params(), f, ensure_ascii=False, indent=2)
-            self.append_log(f"UI参数已导出：{path}")
-            self._show_themed_message("导出成功", f"UI参数已导出：\n{path}")
-        except Exception as exc:
-            self._show_themed_message("导出失败", f"导出UI参数失败：{exc}", QMessageBox.Icon.Critical)
-            self.append_log(f"导出UI参数失败：{exc}")
-
-    def import_ui_params(self) -> None:
-        """导入卡片 UI 布局参数，并保存为 config/card_layout_debug.json。"""
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "导入UI参数",
-            str(self.base_dir),
-            "JSON 参数文件 (*.json);;所有文件 (*.*)",
-        )
-        if not path:
-            return
-        try:
-            data = json.loads(Path(path).read_text(encoding="utf-8"))
-            if not isinstance(data, dict):
-                raise ValueError("UI参数文件顶层结构不是对象")
-            if not hasattr(self, "card_area"):
-                raise RuntimeError("当前界面没有可调参的卡片区域")
-            for key, item in data.items():
-                if key in self.card_area.overview_layout and isinstance(item, dict):
-                    self.card_area.overview_layout[key] = _pose_from_dict(item, self.card_area.overview_layout[key])
-            self.card_area.apply_layout()
-
-            debug_path = self.base_dir / "config" / "card_layout_debug.json"
-            debug_path.parent.mkdir(parents=True, exist_ok=True)
-            with debug_path.open("w", encoding="utf-8") as f:
-                json.dump(self._collect_ui_params(), f, ensure_ascii=False, indent=2)
-
-            if getattr(self.card_area, "_tuner_dialog", None) is not None:
-                self.card_area._tuner_dialog._sync_controls()
-
-            self.append_log(f"UI参数已导入并保存：{path}")
-            self._show_themed_message("导入成功", "UI参数已导入，并保存为默认调参文件。")
-        except Exception as exc:
-            self._show_themed_message("导入失败", f"导入UI参数失败：{exc}", QMessageBox.Icon.Critical)
-            self.append_log(f"导入UI参数失败：{exc}")
 
     def open_external_url(self, url: str) -> None:
         try:

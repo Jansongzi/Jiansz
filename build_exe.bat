@@ -1,11 +1,11 @@
 @echo off
 chcp 65001 >nul
-title Build Jiansz v1.0 - v3
+title Build Jiansz
 
 cd /d "%~dp0"
 
 echo ========================================
-echo Build Jiansz v1.0 - v3
+echo Build Jiansz
 echo ========================================
 echo.
 
@@ -66,29 +66,15 @@ echo [3/6] Cleaning old build files...
 
 if exist build rmdir /s /q build
 if exist dist rmdir /s /q dist
-if exist Jiansz.spec del /q Jiansz.spec
 
 echo.
-echo [4/6] Preparing icon...
-
-set "ICON_ARG="
-
-if exist "assets\icon.ico" (
-    set "ICON_ARG=--icon=assets\icon.ico"
-    echo Found icon: assets\icon.ico
-) else (
-    if exist "jiansz.ico" (
-        set "ICON_ARG=--icon=jiansz.ico"
-        echo Found icon: jiansz.ico
-    ) else (
-        echo No icon found. Building with default icon.
-    )
-)
+echo [4/6] Checking packaging manifest...
+if not exist "Jiansz.spec" goto BUILD_FAIL
 
 echo.
 echo [5/6] Building Jiansz.exe...
 
-%PYTHON_CMD% -m PyInstaller --noconfirm --onedir --windowed --uac-admin --name=Jiansz %ICON_ARG% --add-data "assets;assets" --add-data "config;config" main.py
+%PYTHON_CMD% -m PyInstaller --noconfirm Jiansz.spec
 if errorlevel 1 goto BUILD_FAIL
 
 echo.
@@ -99,8 +85,7 @@ if exist "README.md" copy /Y "README.md" "dist\Jiansz\README.md" >nul
 if exist "USER_GUIDE.md" copy /Y "USER_GUIDE.md" "dist\Jiansz\USER_GUIDE.md" >nul
 if exist "FAQ.md" copy /Y "FAQ.md" "dist\Jiansz\FAQ.md" >nul
 if exist "CHANGELOG.md" copy /Y "CHANGELOG.md" "dist\Jiansz\CHANGELOG.md" >nul
-if exist "RELEASE_NOTES_v1.0.md" copy /Y "RELEASE_NOTES_v1.0.md" "dist\Jiansz\RELEASE_NOTES_v1.0.md" >nul
-if exist "RELEASE_NOTES_v1.0_RC1.md" copy /Y "RELEASE_NOTES_v1.0_RC1.md" "dist\Jiansz\RELEASE_NOTES_v1.0_RC1.md" >nul
+if exist "RELEASE_NOTES_v0.1.1_RC1.md" copy /Y "RELEASE_NOTES_v0.1.1_RC1.md" "dist\Jiansz\RELEASE_NOTES_v0.1.1_RC1.md" >nul
 if exist "LICENSE" copy /Y "LICENSE" "dist\Jiansz\LICENSE" >nul
 
 if exist "docs" xcopy /E /I /Y "docs" "dist\Jiansz\docs" >nul
@@ -117,7 +102,7 @@ echo 1. Run dist\Jiansz\Jiansz.exe
 echo 2. Test UI/assets/logs/tasks
 echo 3. Remove logs/runtime_stats before final release
 echo 4. Check config.json does not contain private paths
-echo 5. Zip dist\Jiansz as Jiansz_v1.0.zip
+echo 5. Zip dist\Jiansz as Jiansz_v0.1.1_RC1.zip
 echo.
 pause
 exit /b 0

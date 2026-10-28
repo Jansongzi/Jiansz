@@ -1,25 +1,12 @@
-# 简小松素材放置说明
+# 状态素材
 
-V28.7 支持 4 个状态：
+当前代码仍会按 Idle、Work、Rest、Error 状态加载这些素材。新版侧栏界面的立绘和气泡控件默认隐藏，素材暂时保留供状态逻辑读取。
 
-- idle：未执行任务时待机，建议 3 张。
-- work：任务执行中，建议 2 张。
-- rest：暂停、停止、完成后休息，建议 3 张。
-- error：异常提示，建议 2 张。
+当前文件命名为：
 
-推荐命名：
+- `idle/idle_01.png` 至 `idle_03.png`
+- `work/work_01.png` 至 `work_02.png`
+- `rest/rest_01.png` 至 `rest_03.png`
+- `error/error_01.png` 至 `error_02.png`
 
-```text
-assets/status_character/idle/idle_1.png
-assets/status_character/idle/idle_2.png
-assets/status_character/idle/idle_3.png
-assets/status_character/work/work_1.png
-assets/status_character/work/work_2.png
-assets/status_character/rest/rest_1.png
-assets/status_character/rest/rest_2.png
-assets/status_character/rest/rest_3.png
-assets/status_character/error/error_1.png
-assets/status_character/error/error_2.png
-```
-
-也兼容直接放在 `assets/status_character/` 下的 `idle_1.png`、`work_1.png`、`rest_1.png`、`error_1.png` 等旧式命名。
+加载器也兼容状态目录中的其他 PNG、JPG、JPEG、WEBP 文件，以及素材根目录中以状态名开头的图片。

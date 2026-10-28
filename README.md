@@ -79,7 +79,7 @@ Bilibili：<https://space.bilibili.com/397555449?spm_id_from=333.1007.0.0>
 当前公开版本为：
 
 ```text
-Jiansz v1.0 RC1
+Jiansz v0.1.1 RC1
 ```
 
 该版本对应开发基线：
@@ -451,31 +451,11 @@ ok-ww
 
 ---
 
-### 10. 简小松状态系统
+### 10. 状态反馈
 
-简小松内置简小松系统。
+当前界面通过启动中心的运行仪表盘、任务进度、运行日志和异常报告反馈调度状态。
 
-当前状态包括：
-
-| 状态 | 含义 |
-|---|---|
-| Idle | 待机 |
-| Work | 执行任务中 |
-| Rest | 暂停或停止 |
-| Error | 出现异常 |
-
-简小松会根据任务执行状态切换，并配合气泡提示展示当前情况。
-
-这个系统的目标并不是“装饰”，而是让工具在长时间挂机场景中更容易被理解：
-
-```text
-现在是在执行
-现在是暂停
-现在出了问题
-现在任务结束
-```
-
-用户可以通过视觉反馈快速判断当前状态。
+代码仍保留 Idle、Work、Rest、Error 简小松状态逻辑与素材，但新版启动中心中的立绘和气泡控件默认隐藏，当前不提供旧版的简小松卡片界面。
 
 ---
 
@@ -546,54 +526,58 @@ MaaEnd 有时会在游戏结束后保留自身进程。当前版本会以游戏�
 
 ---
 
-## 项目截图
+## 当前界面与截图
 
-建议在仓库中放置截图到：
+当前源码采用左侧导航与五个独立页面：
 
-```text
-docs/images/
-```
+| 页面 | 功能 |
+| --- | --- |
+| 启动中心 | 插画横幅、执行控制、运行仪表盘和任务速览 |
+| 任务调度 | 左侧任务列表与右侧任务配置，支持拖拽排序 |
+| 运行统计 | 历史任务耗时与统计记录 |
+| 运行日志 | 日志查看、复制及日志目录入口 |
+| 全局设置 | 完成后操作、系统行为和主题选择 |
 
-推荐文件名：
-
-```text
-docs/images/main_page.png
-docs/images/task_page.png
-docs/images/log_page.png
-```
-
-README 中可引用：
-
-```markdown
-![主界面](docs/images/main_page.png)
-![任务配置](docs/images/task_page.png)
-![运行日志](docs/images/log_page.png)
-```
+旧版卡片界面的四张截图已移除。当前尚未补充新版 Windows 实机截图，请以源码及[离线使用说明](docs/index.html)为准。
 
 ---
 
-## 当前项目结构建议
+## 源码运行与打包
 
-建议仓库结构：
+运行环境为 Windows 10 / 11、Python 3.10 或更新版本。在项目目录安装依赖后启动：
+
+```powershell
+py -3 -m pip install -r requirements.txt
+py -3 main.py
+```
+
+需要管理员权限时可使用 `run_admin.bat`。打包运行 `build_exe.bat`，使用仓库内的 `Jiansz.spec` 统一收集当前素材和离线文档，输出目录为 `dist/Jiansz/`。
+
+`config.json` 为运行配置；发布前请检查其中的本机脚本路径和自动执行、关机等设置。日志、统计和运行配置备份不应作为源码提交。
+
+## 项目结构
 
 ```text
-Anigame-script-manager/
-├─ README.md
+Jiansz/
+├─ main.py                     # 程序入口
+├─ core/                       # 调度、配置、进程与窗口监控
+├─ ui/main_window.py           # 当前侧栏界面
+├─ assets/
+│  ├─ banner/banner.jpg        # 启动中心横幅
+│  ├─ bg/classic/bg_01.png     # 当前背景
+│  ├─ icon.ico                 # 应用图标
+│  └─ status_character/                  # 状态逻辑仍会读取的素材
+├─ docs/index.html             # 离线使用说明
+├─ config.json                 # 当前运行配置
+├─ build_exe.bat               # Windows 打包入口
+├─ Jiansz.spec                 # 打包清单
+├─ run_admin.bat               # 管理员启动入口
+├─ requirements.txt
 ├─ USER_GUIDE.md
 ├─ FAQ.md
 ├─ CHANGELOG.md
-├─ RELEASE_NOTES_v1.0_RC1.md
-├─ LICENSE
-├─ requirements.txt
-├─ core/
-├─ ui/
-├─ assets/
-├─ docs/
-│  └─ images/
-└─ .gitignore
+└─ RELEASE_NOTES_v0.1.1_RC1.md
 ```
-
-开发阶段的零散版本说明文件可以移出主目录，避免影响 GitHub 首页观感。
 
 ---
 

@@ -11,7 +11,7 @@ if not "%errorlevel%"=="0" (
     exit /b
 )
 
-echo Start Jiansz v30 [Administrator]
+echo Start Jiansz [Administrator]
 echo Current directory: %CD%
 echo ==========================================
 echo.

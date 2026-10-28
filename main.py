@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 from core import _write_startup_error, app_dir
 
 try:
@@ -23,7 +22,6 @@ def main() -> int:
     icon_paths = [
         base / "assets" / "icon.ico",
         base / "icon.ico",
-        Path(r"C:\Users\Jiansonze\Pictures\图标\s2ryw-u10dx-001.ico"),
     ]
     icon = None
     for p in icon_paths:
