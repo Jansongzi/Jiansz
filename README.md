@@ -538,7 +538,37 @@ MaaEnd 有时会在游戏结束后保留自身进程。当前版本会以游戏�
 | 运行日志 | 日志查看、复制及日志目录入口 |
 | 全局设置 | 完成后操作、系统行为和主题选择 |
 
-旧版卡片界面的四张截图已移除。当前尚未补充新版 Windows 实机截图，请以源码及[离线使用说明](docs/index.html)为准。
+以下五张截图由作者提供，来自 Windows 运行环境，界面版本标识为 **v1.0 RC1.7**。本节展示该运行版本的界面；仓库源码版本号和发布记录保持原样。使用方法见[离线使用说明](docs/index.html)。
+
+### 启动中心
+
+核心调度控制、运行仪表盘与任务速览。
+
+![启动中心 · v1.0 RC1.7](docs/images/dashboard-rc1-7.png)
+
+### 任务调度
+
+任务列表、启动参数、超时与完成判断策略。
+
+![任务调度 · v1.0 RC1.7](docs/images/tasks-rc1-7.png)
+
+### 运行统计
+
+执行次数、累计与平均耗时、最近完成记录。
+
+![运行统计 · v1.0 RC1.7](docs/images/statistics-rc1-7.png)
+
+### 运行日志
+
+实时日志、复制导出与自动滚动。
+
+![运行日志 · v1.0 RC1.7](docs/images/logs-rc1-7.png)
+
+### 全局设置
+
+开机自启动、超时截图、关机与异常提醒。
+
+![全局设置 · v1.0 RC1.7](docs/images/settings-rc1-7.png)
 
 ---
 
@@ -567,7 +597,9 @@ Jiansz/
 │  ├─ bg/classic/bg_01.png     # 当前背景
 │  ├─ icon.ico                 # 应用图标
 │  └─ status_character/                  # 状态逻辑仍会读取的素材
-├─ docs/index.html             # 离线使用说明
+├─ docs/
+│  ├─ index.html               # 离线使用说明
+│  └─ images/                  # 作者提供的新版界面截图
 ├─ config.json                 # 当前运行配置
 ├─ build_exe.bat               # Windows 打包入口
 ├─ Jiansz.spec                 # 打包清单

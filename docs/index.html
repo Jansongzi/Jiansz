@@ -24,6 +24,9 @@
     nav a:hover, nav a:focus-visible { color: var(--accent); }
     main { min-width: 0; }
     section { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 28px; margin-bottom: 24px; }
+    figure { margin: 26px 0 0; }
+    figure img { display: block; width: 100%; height: auto; border: 1px solid var(--line); border-radius: 8px; }
+    figcaption { margin-top: 8px; color: var(--muted); font-size: 14px; }
     table { border-collapse: collapse; width: 100%; font-size: 14px; }
     th, td { text-align: left; padding: 12px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
     th:first-child, td:first-child { width: 100px; white-space: nowrap; }
@@ -53,6 +56,7 @@
     <nav aria-label="使用说明目录">
       <a href="#start">快速开始</a>
       <a href="#pages">界面导航</a>
+      <a href="#screenshots">界面截图</a>
       <a href="#tasks">任务配置</a>
       <a href="#monitor">监控与收尾</a>
       <a href="#settings">全局设置</a>
@@ -83,7 +87,16 @@
             <tr><td>全局设置</td><td>配置任务完成后操作、系统行为、超时截图与主题。</td></tr>
           </tbody>
         </table>
-        <p class="note">旧版卡片界面的截图已移除，待补充新版 Windows 实机截图。当前立绘和气泡控件默认隐藏，状态信息请查看仪表盘、日志和异常报告。</p>
+        <p class="note">当前立绘和气泡控件默认隐藏，状态信息请查看仪表盘、日志和异常报告。</p>
+      </section>
+      <section id="screenshots">
+        <h2>界面截图</h2>
+        <p class="muted">作者提供的 Windows 运行截图，界面版本标识为 v1.0 RC1.7。点击图片可查看原图；截图展示运行版本，源码版本号保持原样。</p>
+        <figure><a href="images/dashboard-rc1-7.png"><img src="images/dashboard-rc1-7.png" alt="启动中心 · v1.0 RC1.7" width="1770" height="1140" loading="lazy"></a><figcaption>启动中心：核心调度控制、运行仪表盘与任务速览</figcaption></figure>
+        <figure><a href="images/tasks-rc1-7.png"><img src="images/tasks-rc1-7.png" alt="任务调度 · v1.0 RC1.7" width="1770" height="1140" loading="lazy"></a><figcaption>任务调度：任务列表、启动参数、超时与完成判断策略</figcaption></figure>
+        <figure><a href="images/statistics-rc1-7.png"><img src="images/statistics-rc1-7.png" alt="运行统计 · v1.0 RC1.7" width="1770" height="1140" loading="lazy"></a><figcaption>运行统计：执行次数、累计与平均耗时、最近完成记录</figcaption></figure>
+        <figure><a href="images/logs-rc1-7.png"><img src="images/logs-rc1-7.png" alt="运行日志 · v1.0 RC1.7" width="1770" height="1140" loading="lazy"></a><figcaption>运行日志：实时日志、复制导出与自动滚动</figcaption></figure>
+        <figure><a href="images/settings-rc1-7.png"><img src="images/settings-rc1-7.png" alt="全局设置 · v1.0 RC1.7" width="1770" height="1140" loading="lazy"></a><figcaption>全局设置：开机自启动、超时截图、关机与异常提醒</figcaption></figure>
       </section>
       <section id="tasks">
         <h2>任务配置</h2>
