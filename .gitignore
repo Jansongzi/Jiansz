@@ -46,6 +46,12 @@ Desktop.ini
 .coverage
 htmlcov/
 
-# Obsolete card layout tuning artifacts
-card_layout_debug.json
-config/card_layout_debug.json
+# Stored account and mail credentials
+*.dpapi
+notes_accounts.bin
+notes_accounts.lock
+config.json.*.bak
+config.json.bak_*
+
+# Local card layout exports
+/card_layout_debug.json

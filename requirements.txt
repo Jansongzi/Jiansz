@@ -1,2 +1,5 @@
 PySide6
 psutil
+packaging
+pywebview
+Pillow

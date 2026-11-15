@@ -5,20 +5,84 @@ from core import *
 import random
 import re
 import json
+from ui.update_dialog import UpdateDialog
+from ui.cards import CardPanel
+from ui.card_scene import CardSceneWidget, _pose_from_dict
 from PySide6.QtCore import (
     QPropertyAnimation, QParallelAnimationGroup, QSequentialAnimationGroup,
     QEasingCurve, QRect, QRectF, QDateTime, QSize, Signal, QEvent, Property, QPointF
 )
-from PySide6.QtGui import QColor, QBrush, QPainter, QPainterPath, QPen, QLinearGradient, QPixmap
+from PySide6.QtGui import QColor, QBrush, QPainter, QPainterPath, QPen, QLinearGradient, QPixmap, QFontMetrics
 from PySide6.QtWidgets import (
     QGraphicsOpacityEffect, QTableView, QAbstractScrollArea, QMenu, QFrame,
     QStyledItemDelegate, QStyleOptionButton, QStyle, QStackedWidget, QScrollArea, QSplitter,
-    QLineEdit, QSpinBox, QProgressBar, QListWidget, QListWidgetItem
+    QLineEdit, QSpinBox, QProgressBar, QListWidget, QListWidgetItem, QInputDialog, QDialogButtonBox,
+    QSizePolicy
 )
 
 
+def _find_asset_file(base_dir: Path, *parts: str) -> Path | None:
+    """优先从源码/运行目录查找资源，缺失时回退到 PyInstaller _MEIPASS 资源目录。"""
+    candidate = base_dir / "assets" / Path(*parts)
+    if candidate.exists():
+        return candidate
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        bundled = Path(meipass) / "assets" / Path(*parts)
+        if bundled.exists():
+            return bundled
+    return None
+
+
+def _rounded_pixmap(path: Path | str | None, size: int, radius: int) -> QPixmap | None:
+    """将本地 PNG/JPG 图标裁剪为指定尺寸与圆角的 QPixmap。"""
+    if not path:
+        return None
+    src = QPixmap(str(path))
+    if src.isNull():
+        return None
+    scaled = src.scaled(
+        size,
+        size,
+        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+    crop_x = max(0, (scaled.width() - size) // 2)
+    crop_y = max(0, (scaled.height() - size) // 2)
+    out = QPixmap(size, size)
+    out.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(out)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+    clip = QPainterPath()
+    clip.addRoundedRect(QRectF(0, 0, size, size), radius, radius)
+    painter.setClipPath(clip)
+    painter.drawPixmap(0, 0, scaled, crop_x, crop_y, size, size)
+    painter.end()
+    return out
+
+
+def _task_game_icon_path(
+    base_dir: Path,
+    task_name: str,
+    script_path: str = "",
+    window_keywords: list[str] | None = None,
+) -> Path | None:
+    """根据任务名称/路径/窗口关键词匹配对应的游戏官方图标。"""
+    haystack = " ".join([task_name or "", script_path or "", *(window_keywords or [])]).lower()
+    if any(k in haystack for k in ("鸣潮", "ok-ww", "wuthering")):
+        return _find_asset_file(base_dir, "games", "wuwa_app.png")
+    if any(k in haystack for k in ("星穹", "march7th", "starrail", "hsr")):
+        return _find_asset_file(base_dir, "games", "hsr_app.png")
+    if any(k in haystack for k in ("绝区零", "onedragon", "zzz")):
+        return _find_asset_file(base_dir, "games", "zzz_app.png")
+    if any(k in haystack for k in ("原神", "bettergi", "yuanshen", "genshin")):
+        return _find_asset_file(base_dir, "games", "genshin_app.png")
+    return None
+
+
 class RootBackgroundWidget(QWidget):
-    """支持背景壁纸 30% 不透明度叠加深色底板的现代沉浸式根窗口。"""
+    """支持背景壁纸柔暗遮罩叠加深色底板的现代沉浸式根窗口。"""
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -37,24 +101,38 @@ class RootBackgroundWidget(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
 
         rect = self.rect()
         path = QPainterPath()
         path.addRoundedRect(QRectF(rect), 16, 16)
 
         # 1. 深色科技底色 (纯深色基底)
-        painter.fillPath(path, QBrush(QColor(16, 20, 28)))
+        painter.fillPath(path, QBrush(QColor(13, 17, 26)))
 
-        # 2. 40% 不透明度壁纸图层 (保证视觉通透同时极大提升文字可读性与壁纸质感)
+        # 2. 壁纸图层 + 纵向柔暗遮罩，压低背景碎光点以保证前景毛玻璃文字可读性
         if self._bg_pixmap and not self._bg_pixmap.isNull():
             painter.save()
             painter.setClipPath(path)
-            painter.setOpacity(0.40)
-            painter.drawPixmap(rect, self._bg_pixmap)
+            painter.setOpacity(0.34)
+            scaled = self._bg_pixmap.scaled(
+                self.size(),
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            draw_x = (self.width() - scaled.width()) // 2
+            draw_y = (self.height() - scaled.height()) // 2
+            painter.drawPixmap(draw_x, draw_y, scaled)
+            painter.setOpacity(1.0)
+            scrim = QLinearGradient(0, 0, 0, self.height())
+            scrim.setColorAt(0.0, QColor(10, 14, 24, 90))
+            scrim.setColorAt(0.55, QColor(10, 14, 24, 120))
+            scrim.setColorAt(1.0, QColor(10, 14, 24, 165))
+            painter.fillRect(rect, QBrush(scrim))
             painter.restore()
 
         # 3. 顶层精致圆角微光边框
-        painter.setPen(QPen(QColor(70, 95, 135, 140), 1.5))
+        painter.setPen(QPen(QColor(86, 118, 172, 130), 1.4))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRoundedRect(QRectF(rect).adjusted(0.75, 0.75, -0.75, -0.75), 16, 16)
 
@@ -65,7 +143,7 @@ class DashboardBannerWidget(QFrame):
     def __init__(self, banner_path: str | Path | None = None, parent: QWidget | None = None):
         super().__init__(parent)
         self.setObjectName("DashboardBannerCard")
-        self.setFixedHeight(180)
+        self.setFixedHeight(168)
         self._banner_pixmap: QPixmap | None = None
         self._load_banner(banner_path)
 
@@ -78,6 +156,7 @@ class DashboardBannerWidget(QFrame):
         base = app_dir()
         candidates.extend([
             base / "assets" / "banner" / "banner.jpg",
+            base / "assets" / "banner.jpg",
             base / "assets" / "banner" / "banner.png",
         ])
 
@@ -102,7 +181,7 @@ class DashboardBannerWidget(QFrame):
         path.addRoundedRect(QRectF(rect), 14, 14)
 
         # 1. 基础深色背景
-        painter.fillPath(path, QBrush(QColor(18, 24, 36)))
+        painter.fillPath(path, QBrush(QColor(15, 20, 32)))
 
         # 2. 绘制插画背景 (铺满横幅卡片)
         if self._banner_pixmap and not self._banner_pixmap.isNull():
@@ -115,18 +194,23 @@ class DashboardBannerWidget(QFrame):
             draw_y = (self.height() - scaled.height()) // 2
             painter.drawPixmap(draw_x, draw_y, scaled)
 
-            # 3. 极简轻量微透渐变：左侧轻微压暗保证文字阅读，右侧完整透出明亮插画（如同 BetterGI）
+            # 3. 左侧深色可读性渐变遮罩 + 右侧透出明亮插画
             grad = QLinearGradient(0, 0, self.width(), 0)
-            grad.setColorAt(0.0, QColor(10, 14, 22, 175))
-            grad.setColorAt(0.40, QColor(10, 14, 22, 120))
-            grad.setColorAt(0.75, QColor(10, 14, 22, 20))
-            grad.setColorAt(1.0, QColor(10, 14, 22, 0))
+            grad.setColorAt(0.0, QColor(10, 14, 24, 228))
+            grad.setColorAt(0.42, QColor(10, 14, 24, 175))
+            grad.setColorAt(0.76, QColor(10, 14, 24, 52))
+            grad.setColorAt(1.0, QColor(10, 14, 24, 12))
             painter.fillRect(rect, QBrush(grad))
+
+            bottom_fade = QLinearGradient(0, self.height() * 0.55, 0, self.height())
+            bottom_fade.setColorAt(0.0, QColor(10, 14, 24, 0))
+            bottom_fade.setColorAt(1.0, QColor(10, 14, 24, 88))
+            painter.fillRect(rect, QBrush(bottom_fade))
 
             painter.restore()
 
         # 4. 微光圆角外边框
-        painter.setPen(QPen(QColor(70, 95, 145, 140), 1.5))
+        painter.setPen(QPen(QColor(105, 145, 210, 125), 1.3))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRoundedRect(QRectF(rect).adjusted(0.75, 0.75, -0.75, -0.75), 14, 14)
 
@@ -436,33 +520,57 @@ class NavButton(QPushButton):
 
 
 class FluentCard(QFrame):
-    """BetterGI 风格的深色质感卡片容器。"""
+    """分层玻璃拟态深色卡片容器。"""
 
     def __init__(self, title: str = "", subtitle: str = "", parent: QWidget | None = None):
         super().__init__(parent)
         self.setObjectName("FluentCard")
         self.setStyleSheet("""
             QFrame#FluentCard {
-                background-color: rgba(34, 39, 50, 230);
-                border: 1px solid rgba(65, 75, 95, 140);
-                border-radius: 10px;
+                background-color: rgba(15, 20, 34, 224);
+                border: 1px solid rgba(96, 130, 190, 84);
+                border-radius: 12px;
             }
         """)
         self.main_layout = QVBoxLayout(self)
         self.main_layout.setContentsMargins(16, 14, 16, 14)
-        self.main_layout.setSpacing(12)
+        self.main_layout.setSpacing(11)
 
         if title:
+            header_wrap = QVBoxLayout()
+            header_wrap.setSpacing(6)
+
+            title_row = QHBoxLayout()
+            title_row.setSpacing(8)
+            accent_bar = QFrame()
+            accent_bar.setFixedSize(3, 15)
+            accent_bar.setStyleSheet("""
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #60A5FA, stop:1 #2DD4BF);
+                border: none;
+                border-radius: 1px;
+            """)
+            title_row.addWidget(accent_bar)
+
             header_layout = QVBoxLayout()
             header_layout.setSpacing(2)
             self.title_label = QLabel(title)
-            self.title_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #60A5FA; background: transparent;")
+            self.title_label.setStyleSheet("font-size: 14px; font-weight: 700; color: #F1F5F9; background: transparent; border: none;")
             header_layout.addWidget(self.title_label)
 
             if subtitle:
                 self.subtitle_label = QLabel(subtitle)
-                self.subtitle_label.setStyleSheet("font-size: 11.5px; color: #8C9BB4; background: transparent;")
+                self.subtitle_label.setStyleSheet("font-size: 11.5px; color: #8CA0BE; background: transparent; border: none;")
                 header_layout.addWidget(self.subtitle_label)
+
+            title_row.addLayout(header_layout, stretch=1)
+            header_wrap.addLayout(title_row)
+
+            header_div = QFrame()
+            header_div.setFixedHeight(1)
+            header_div.setStyleSheet("background-color: rgba(148, 163, 184, 24); border: none;")
+            header_wrap.addWidget(header_div)
+
+            self.main_layout.addLayout(header_wrap)
 
 class StartupReportDialog(QDialog):
     """上次运行异常报告弹窗（支持长文本滚动、固定高度、随时关闭）。"""
@@ -582,55 +690,124 @@ class StartupReportDialog(QDialog):
 
 
 class MasterTaskItemWidget(QFrame):
-    """左侧任务列表中的单个任务卡片项 (极简干净 Fluent 风格)。"""
+    """左侧任务列表中的单个任务卡片项 (带游戏徽标与子信息分层风格)。"""
 
     clicked = Signal(int)
     toggled = Signal(int, bool)
 
-    def __init__(self, index: int, name: str, enabled: bool, parent: QWidget | None = None):
+    def __init__(
+        self,
+        index: int,
+        name: str,
+        enabled: bool,
+        parent: QWidget | None = None,
+        *,
+        subtitle: str = "",
+        icon_path: Path | None = None,
+    ):
         super().__init__(parent)
         self.setObjectName("MasterTaskItem")
         self.task_index = index
+        self._raw_name = name
         self._selected = False
-        self.setFixedHeight(46)
+        self.setFixedHeight(56)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 0, 12, 0)
-        layout.setSpacing(10)
+        layout.setContentsMargins(10, 6, 11, 6)
+        layout.setSpacing(8)
 
         # 拖拽手柄
         self.handle_label = QLabel("⠿")
         self.handle_label.setObjectName("ItemHandle")
+        self.handle_label.setFixedWidth(12)
         self.handle_label.setCursor(Qt.CursorShape.SizeVerCursor)
         self.handle_label.setToolTip("按住上下拖拽调整执行优先级")
-        self.handle_label.setStyleSheet("color: #64748B; font-size: 15px; background: transparent; border: none;")
+        self.handle_label.setStyleSheet("color: #64748B; font-size: 14px; background: transparent; border: none;")
         layout.addWidget(self.handle_label)
 
-        # 状态指示灯
+        # 游戏 / 任务图标徽标
+        self.icon_badge = QLabel()
+        self.icon_badge.setFixedSize(28, 28)
+        self.icon_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.icon_badge)
+
+        # 任务名称 + 次级摘要双行文本区
+        text_col = QVBoxLayout()
+        text_col.setContentsMargins(0, 0, 0, 0)
+        text_col.setSpacing(2)
+
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.setSpacing(5)
+
         self.dot_label = QLabel("●")
         self.dot_label.setObjectName("ItemDot")
-        self._update_dot(enabled)
-        layout.addWidget(self.dot_label)
+        self.dot_label.setFixedWidth(10)
+        title_row.addWidget(self.dot_label)
 
-        # 任务名称
-        self.name_label = QLabel(name)
+        self.name_label = QLabel()
         self.name_label.setObjectName("ItemName")
-        self.name_label.setStyleSheet("font-size: 13px; font-weight: 600; color: #E2E8F0; background: transparent; border: none;")
-        layout.addWidget(self.name_label, stretch=1)
+        self.name_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.name_label.setMinimumWidth(0)
+        self.name_label.setStyleSheet("font-size: 13px; font-weight: 700; color: #F1F5F9; background: transparent; border: none;")
+        title_row.addWidget(self.name_label, stretch=1)
+        text_col.addLayout(title_row)
+
+        self.sub_label = QLabel(subtitle or f"#{index + 1} · 点击编辑调度配置")
+        self.sub_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.sub_label.setMinimumWidth(0)
+        self.sub_label.setStyleSheet("font-size: 10.5px; color: #8CA0BE; background: transparent; border: none;")
+        text_col.addWidget(self.sub_label)
+
+        layout.addLayout(text_col, stretch=1)
 
         # 切换开关 Toggle Switch
         self.switch_btn = SwitchButton(checked=enabled)
         self.switch_btn.toggled.connect(lambda chk: self._on_switch_toggled(chk))
         layout.addWidget(self.switch_btn)
 
+        self._apply_icon(name, icon_path)
+        self._apply_elided_name(name)
+        self._update_dot(enabled)
         self._update_style()
+
+    def _apply_icon(self, name: str, icon_path: Path | None) -> None:
+        pix = _rounded_pixmap(icon_path, 28, 7) if icon_path else None
+        if pix is not None:
+            self.icon_badge.setPixmap(pix)
+            self.icon_badge.setText("")
+            self.icon_badge.setStyleSheet("background: transparent; border: 1px solid rgba(148, 163, 184, 55); border-radius: 7px;")
+        else:
+            self.icon_badge.setPixmap(QPixmap())
+            short = (name.strip()[:2] if name else "TS").upper()
+            self.icon_badge.setText(short)
+            self.icon_badge.setStyleSheet("""
+                background-color: rgba(59, 130, 246, 36);
+                color: #93C5FD;
+                border: 1px solid rgba(96, 165, 250, 95);
+                border-radius: 7px;
+                font-size: 10.5px;
+                font-weight: 800;
+            """)
+
+    def _apply_elided_name(self, name: str) -> None:
+        self._raw_name = name
+        self.setToolTip(name)
+        fm = QFontMetrics(self.name_label.font())
+        avail = max(118, self.name_label.width() if self.name_label.width() > 40 else 154)
+        self.name_label.setText(fm.elidedText(name, Qt.TextElideMode.ElideRight, avail))
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if self._raw_name:
+            self._apply_elided_name(self._raw_name)
 
     def _update_dot(self, enabled: bool) -> None:
         if enabled:
-            self.dot_label.setStyleSheet("color: #10B981; font-size: 10px; background: transparent; border: none;")
+            self.dot_label.setStyleSheet("color: #34D399; font-size: 9.5px; background: transparent; border: none;")
         else:
-            self.dot_label.setStyleSheet("color: #64748B; font-size: 10px; background: transparent; border: none;")
+            self.dot_label.setStyleSheet("color: #64748B; font-size: 9.5px; background: transparent; border: none;")
 
     def _on_switch_toggled(self, chk: bool) -> None:
         self._update_dot(chk)
@@ -640,9 +817,21 @@ class MasterTaskItemWidget(QFrame):
         self._selected = selected
         self._update_style()
 
-    def update_info(self, index: int, name: str, enabled: bool) -> None:
+    def update_info(
+        self,
+        index: int,
+        name: str,
+        enabled: bool,
+        *,
+        subtitle: str | None = None,
+        icon_path: Path | None = None,
+    ) -> None:
         self.task_index = index
-        self.name_label.setText(name)
+        self._apply_elided_name(name)
+        if subtitle is not None:
+            self.sub_label.setText(subtitle)
+        if icon_path is not None:
+            self._apply_icon(name, icon_path)
         self.switch_btn.setChecked(enabled, animate=False)
         self._update_dot(enabled)
 
@@ -650,21 +839,21 @@ class MasterTaskItemWidget(QFrame):
         if self._selected:
             self.setStyleSheet("""
                 QFrame#MasterTaskItem {
-                    background-color: rgba(59, 130, 246, 45);
+                    background-color: rgba(37, 99, 235, 44);
                     border: 1.5px solid #3B82F6;
-                    border-radius: 8px;
+                    border-radius: 10px;
                 }
             """)
         else:
             self.setStyleSheet("""
                 QFrame#MasterTaskItem {
-                    background-color: rgba(30, 36, 48, 160);
-                    border: 1px solid rgba(60, 72, 95, 120);
-                    border-radius: 8px;
+                    background-color: rgba(22, 29, 46, 185);
+                    border: 1px solid rgba(96, 130, 190, 48);
+                    border-radius: 10px;
                 }
                 QFrame#MasterTaskItem:hover {
-                    background-color: rgba(45, 54, 70, 200);
-                    border-color: rgba(85, 105, 140, 180);
+                    background-color: rgba(31, 41, 64, 222);
+                    border-color: rgba(96, 165, 250, 125);
                 }
             """)
 
@@ -1108,12 +1297,13 @@ class MainWindow(QMainWindow):
 
         link_style = """
             QPushButton {
-                color: #60A5FA;
+                color: #94A3B8;
                 text-decoration: none;
                 border: none;
                 background: transparent;
                 padding: 2px 8px;
                 font-size: 11.5px;
+                font-weight: 500;
             }
             QPushButton:hover {
                 color: #93C5FD;
@@ -1143,6 +1333,163 @@ class MainWindow(QMainWindow):
         if index == 1:
             self._render_master_task_list()
 
+    def _apply_dashboard_button_styles(self) -> None:
+        """统一应用启动中心控制按钮组样式，避免被全局主题覆盖。"""
+        if hasattr(self, "start_button"):
+            self.start_button.setStyleSheet("""
+                QPushButton {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #3B82F6, stop:1 #2563EB);
+                    color: #FFFFFF;
+                    font-size: 13.5px;
+                    font-weight: 700;
+                    border: 1px solid rgba(147, 197, 253, 155);
+                    border-radius: 9px;
+                    padding: 0 20px;
+                }
+                QPushButton:hover {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #60A5FA, stop:1 #1D4ED8);
+                    border-color: #93C5FD;
+                }
+                QPushButton:pressed {
+                    background-color: #1E40AF;
+                }
+                QPushButton:disabled {
+                    background: rgba(37, 99, 235, 72);
+                    color: rgba(255, 255, 255, 130);
+                    border-color: rgba(96, 165, 250, 60);
+                }
+            """)
+
+        normal_ctrl_style = """
+            QPushButton {
+                background-color: rgba(30, 41, 59, 175);
+                color: #E2E8F0;
+                border: 1px solid rgba(100, 116, 139, 110);
+                border-radius: 9px;
+                padding: 0 13px;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: rgba(51, 65, 85, 225);
+                border-color: rgba(148, 163, 184, 175);
+                color: #FFFFFF;
+            }
+            QPushButton:disabled {
+                background-color: rgba(22, 29, 44, 95);
+                color: rgba(148, 163, 184, 95);
+                border-color: rgba(71, 85, 105, 55);
+            }
+        """
+        for btn_name in ["resume_button", "pause_button", "stop_button"]:
+            if hasattr(self, btn_name):
+                getattr(self, btn_name).setStyleSheet(normal_ctrl_style)
+
+        if hasattr(self, "emergency_stop_button"):
+            self.emergency_stop_button.setStyleSheet("""
+                QPushButton {
+                    background-color: rgba(239, 68, 68, 28);
+                    color: #FCA5A5;
+                    border: 1px solid rgba(248, 113, 113, 110);
+                    border-radius: 9px;
+                    padding: 0 13px;
+                    font-size: 12px;
+                    font-weight: 600;
+                }
+                QPushButton:hover {
+                    background-color: rgba(220, 38, 38, 165);
+                    border-color: #FCA5A5;
+                    color: #FFFFFF;
+                }
+                QPushButton:disabled {
+                    background-color: rgba(22, 29, 44, 95);
+                    color: rgba(148, 163, 184, 95);
+                    border-color: rgba(71, 85, 105, 55);
+                }
+            """)
+
+        if hasattr(self, "cancel_shutdown_button"):
+            self.cancel_shutdown_button.setStyleSheet("""
+                QPushButton {
+                    background-color: rgba(30, 41, 59, 155);
+                    color: #CBD5E1;
+                    border: 1px solid rgba(100, 116, 139, 95);
+                    border-radius: 9px;
+                    padding: 0 12px;
+                    font-size: 12px;
+                    font-weight: 600;
+                }
+                QPushButton:hover {
+                    background-color: rgba(245, 158, 11, 42);
+                    border-color: rgba(251, 191, 36, 150);
+                    color: #FDE68A;
+                }
+            """)
+
+    def _set_elapsed_running_style(self, active: bool) -> None:
+        """根据运行状态切换计时器胶囊配色。"""
+        if not hasattr(self, "elapsed_value_label"):
+            return
+        if active:
+            self.elapsed_value_label.setStyleSheet("""
+                color: #6EE7B7;
+                background: rgba(16, 185, 129, 32);
+                border: 1px solid rgba(52, 211, 153, 115);
+                border-radius: 9px;
+                padding: 5px 12px;
+                font-family: 'Cascadia Code', Consolas, monospace;
+                font-size: 15px;
+                font-weight: 700;
+            """)
+        else:
+            self.elapsed_value_label.setStyleSheet("""
+                color: #CBD5E1;
+                background: rgba(30, 41, 59, 175);
+                border: 1px solid rgba(100, 116, 139, 95);
+                border-radius: 9px;
+                padding: 5px 12px;
+                font-family: 'Cascadia Code', Consolas, monospace;
+                font-size: 15px;
+                font-weight: 700;
+            """)
+
+    def _set_dashboard_progress(self, current: int, total: int) -> None:
+        """同步更新启动中心进度文本与细进度条。"""
+        if total > 0:
+            pct = max(0, min(100, int(round(current * 100 / total))))
+            self.progress_value_label.setText(f"进度：{current} / {total} 任务 ({pct}%)")
+            if hasattr(self, "dashboard_progress_bar"):
+                self.dashboard_progress_bar.setRange(0, total)
+                self.dashboard_progress_bar.setValue(max(0, min(current, total)))
+        else:
+            self.progress_value_label.setText("进度：0 / 0 任务 (0%)")
+            if hasattr(self, "dashboard_progress_bar"):
+                self.dashboard_progress_bar.setRange(0, 100)
+                self.dashboard_progress_bar.setValue(0)
+
+    def _update_dashboard_task_overview(self) -> None:
+        """刷新启动中心底部的任务统计与启用队列摘要。"""
+        enabled_tasks = [t for t in self.tasks_list if t.enabled]
+        if hasattr(self, "tasks_count_badge"):
+            self.tasks_count_badge.setText(f"{len(enabled_tasks)}/{len(self.tasks_list)}")
+        if not hasattr(self, "dashboard_task_summary_label"):
+            return
+        self.dashboard_task_summary_label.setText(
+            f"已配置 {len(self.tasks_list)} 个任务 · 已启用 {len(enabled_tasks)} 个"
+        )
+        if hasattr(self, "dashboard_queue_preview_label"):
+            if enabled_tasks:
+                names = []
+                for t in enabled_tasks:
+                    label = (t.window_keywords[0] if getattr(t, "window_keywords", None) else "") or t.name
+                    names.append(label.removesuffix(".exe"))
+                preview = " → ".join(names[:5])
+                if len(names) > 5:
+                    preview += f" +{len(names) - 5}"
+                self.dashboard_queue_preview_label.setText(f"队列：{preview}")
+            else:
+                self.dashboard_queue_preview_label.setText("队列：暂未启用任何调度任务")
+
     def _build_dashboard_page(self) -> None:
         """页面 0：启动中心 (Dashboard) - 精简大气 Banner 与核心仪表盘。"""
         page = QWidget()
@@ -1150,23 +1497,39 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(12)
 
-        # 顶部 BetterGI 风格高清插画大横幅 Banner (高度 240px，充分饱满展示)
-        banner_img_path = self.base_dir / "assets" / "banner" / "banner.jpg"
-        banner_card = DashboardBannerWidget(banner_img_path if banner_img_path.exists() else None, page)
-        banner_card.setFixedHeight(240)
+        # 顶部 BetterGI 风格高清插画大横幅 Banner
+        banner_img_path = self._existing_asset_path("banner", "banner.jpg")
+        banner_card = DashboardBannerWidget(banner_img_path, page)
+        banner_card.setFixedHeight(148)
         banner_layout = QHBoxLayout(banner_card)
-        banner_layout.setContentsMargins(36, 28, 36, 28)
+        banner_layout.setContentsMargins(30, 18, 28, 18)
         banner_layout.setSpacing(16)
 
         banner_text_layout = QVBoxLayout()
-        banner_text_layout.setSpacing(10)
+        banner_text_layout.setSpacing(8)
         banner_text_layout.addStretch(1)
+
+        badge_row = QHBoxLayout()
+        badge_row.setSpacing(8)
+        banner_pill = QLabel("Jiansz · 一条龙调度中心")
+        banner_pill.setStyleSheet("""
+            background-color: rgba(59, 130, 246, 46);
+            color: #93C5FD;
+            border: 1px solid rgba(96, 165, 250, 115);
+            border-radius: 10px;
+            padding: 2px 10px;
+            font-size: 11px;
+            font-weight: 700;
+        """)
+        badge_row.addWidget(banner_pill)
+        badge_row.addStretch(1)
 
         title_label = QLabel("简小松·脚本调度助手")
         title_label.setStyleSheet("font-size: 26px; font-weight: 800; color: #FFFFFF; background: transparent; border: none;")
         sub_title_label = QLabel("自动化二游脚本调度神器 · 稳定高效 · 一条龙托管")
-        sub_title_label.setStyleSheet("font-size: 14px; font-weight: 500; color: #BAE6FD; background: transparent; border: none;")
-        
+        sub_title_label.setStyleSheet("font-size: 13.5px; font-weight: 500; color: #CBD5E1; background: transparent; border: none;")
+
+        banner_text_layout.addLayout(badge_row)
         banner_text_layout.addWidget(title_label)
         banner_text_layout.addWidget(sub_title_label)
         banner_text_layout.addStretch(1)
@@ -1181,33 +1544,24 @@ class MainWindow(QMainWindow):
         layout.addWidget(banner_card)
 
         # 核心控制卡片
-        ctrl_card = FluentCard("核心调度控制", "一键执行全部已启用的任务流程")
-        ctrl_layout = QHBoxLayout()
-        ctrl_layout.setSpacing(10)
-
-        self.start_button = QPushButton("▶  开始执行全部任务")
-        self.start_button.setFixedHeight(42)
-        self.start_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.start_button.setStyleSheet("""
-            QPushButton {
-                background-color: #2563EB;
-                color: #FFFFFF;
-                font-size: 13.5px;
-                font-weight: 700;
-                border: 1px solid #3B82F6;
-                border-radius: 8px;
-                padding: 0 18px;
-            }
-            QPushButton:hover {
-                background-color: #1D4ED8;
-                border-color: #60A5FA;
-            }
-            QPushButton:disabled {
-                background-color: rgba(37, 99, 235, 100);
-                color: rgba(255, 255, 255, 140);
-                border-color: rgba(59, 130, 246, 80);
+        ctrl_card = FluentCard()
+        ctrl_card.setObjectName("DashboardControlCard")
+        ctrl_card.setStyleSheet("""
+            QFrame#DashboardControlCard {
+                background-color: rgba(16, 21, 35, 224);
+                border: 1px solid rgba(100, 135, 195, 92);
+                border-radius: 12px;
             }
         """)
+        ctrl_card.main_layout.setContentsMargins(16, 14, 16, 13)
+        ctrl_card.main_layout.setSpacing(12)
+
+        ctrl_layout = QHBoxLayout()
+        ctrl_layout.setSpacing(8)
+
+        self.start_button = QPushButton("▶  开始执行全部任务")
+        self.start_button.setFixedHeight(36)
+        self.start_button.setCursor(Qt.CursorShape.PointingHandCursor)
 
         self.resume_button = QPushButton("▶ 继续")
         self.pause_button = QPushButton("❚❚ 暂停")
@@ -1216,34 +1570,14 @@ class MainWindow(QMainWindow):
         self.cancel_shutdown_button = QPushButton("✕ 取消关机")
 
         for b in [self.resume_button, self.pause_button, self.stop_button, self.emergency_stop_button, self.cancel_shutdown_button]:
-            b.setFixedHeight(42)
+            b.setFixedHeight(36)
             b.setCursor(Qt.CursorShape.PointingHandCursor)
-            b.setStyleSheet("""
-                QPushButton {
-                    background-color: rgba(38, 48, 64, 200);
-                    color: #F1F5F9;
-                    border: 1px solid rgba(80, 100, 130, 140);
-                    border-radius: 8px;
-                    padding: 0 12px;
-                    font-size: 12.5px;
-                    font-weight: 600;
-                }
-                QPushButton:hover {
-                    background-color: rgba(56, 70, 96, 240);
-                    border-color: rgba(100, 130, 175, 180);
-                    color: #FFFFFF;
-                }
-                QPushButton:disabled {
-                    background-color: rgba(30, 36, 48, 120);
-                    color: #64748B;
-                    border-color: rgba(60, 72, 90, 80);
-                }
-            """)
 
         self.resume_button.setEnabled(False)
         self.pause_button.setEnabled(False)
         self.stop_button.setEnabled(False)
         self.emergency_stop_button.setEnabled(False)
+        self._apply_dashboard_button_styles()
 
         ctrl_layout.addWidget(self.start_button, stretch=3)
         ctrl_layout.addWidget(self.resume_button)
@@ -1252,101 +1586,120 @@ class MainWindow(QMainWindow):
         ctrl_layout.addWidget(self.emergency_stop_button)
         ctrl_layout.addWidget(self.cancel_shutdown_button)
         ctrl_card.main_layout.addLayout(ctrl_layout)
-        layout.addWidget(ctrl_card)
 
-        # 状态仪表盘卡片
-        status_card = FluentCard("调度运行仪表盘", "实时查看任务队列执行进度与耗时")
+        # 状态仪表盘区
         status_h = QHBoxLayout()
         status_h.setSpacing(14)
 
-        # 状态指示灯
         self.status_value_label = QLabel("● 空闲待命")
-        self.status_value_label.setStyleSheet("""
-            color: #38BDF8;
-            background: rgba(56, 189, 248, 30);
-            border: 1px solid rgba(56, 189, 248, 100);
-            border-radius: 8px;
-            padding: 8px 16px;
-            font-size: 13.5px;
-            font-weight: bold;
-        """)
+        self.status_value_label.setObjectName("StatusBadge")
+        self.status_value_label.setMinimumWidth(112)
         self.status_value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        # 进度与当前任务
         info_v = QVBoxLayout()
-        info_v.setSpacing(4)
+        info_v.setSpacing(5)
+        info_top = QHBoxLayout()
+        info_top.setSpacing(10)
         self.task_value_label = QLabel("当前运行：暂无运行任务")
-        self.task_value_label.setStyleSheet("font-size: 13.5px; font-weight: bold; color: #F1F5F9; background: transparent;")
+        self.task_value_label.setStyleSheet("font-size: 13.5px; font-weight: 700; color: #F1F5F9; background: transparent;")
         self.progress_value_label = QLabel("进度：0 / 0 任务 (0%)")
-        self.progress_value_label.setStyleSheet("font-size: 12.5px; color: #94A3B8; background: transparent;")
-        info_v.addWidget(self.task_value_label)
-        info_v.addWidget(self.progress_value_label)
+        self.progress_value_label.setStyleSheet("font-size: 12px; color: #94A3B8; background: transparent;")
+        self.progress_value_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        info_top.addWidget(self.task_value_label, stretch=1)
+        info_top.addWidget(self.progress_value_label)
 
-        # 秒表 (纯单色数字计时)
-        self.elapsed_value_label = QLabel("00:00")
-        self.elapsed_value_label.setStyleSheet("""
-            color: #10B981;
-            background: rgba(16, 185, 129, 30);
-            border: 1px solid rgba(16, 185, 129, 100);
-            border-radius: 8px;
-            padding: 8px 16px;
-            font-family: 'Cascadia Code', Consolas, monospace;
-            font-size: 15px;
-            font-weight: bold;
+        self.dashboard_progress_bar = QProgressBar()
+        self.dashboard_progress_bar.setTextVisible(False)
+        self.dashboard_progress_bar.setRange(0, 100)
+        self.dashboard_progress_bar.setValue(0)
+        self.dashboard_progress_bar.setStyleSheet("""
+            QProgressBar {
+                background-color: rgba(148, 163, 184, 30);
+                border: none;
+                border-radius: 3px;
+                min-height: 6px;
+                max-height: 6px;
+            }
+            QProgressBar::chunk {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #38BDF8, stop:1 #3B82F6);
+                border-radius: 3px;
+            }
         """)
+        info_v.addLayout(info_top)
+        info_v.addWidget(self.dashboard_progress_bar)
+
+        self.elapsed_value_label = QLabel("00:00")
+        self.elapsed_value_label.setMinimumWidth(78)
         self.elapsed_value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._set_elapsed_running_style(False)
 
         status_h.addWidget(self.status_value_label)
         status_h.addLayout(info_v, stretch=1)
         status_h.addWidget(self.elapsed_value_label)
-        status_card.main_layout.addLayout(status_h)
-        layout.addWidget(status_card)
+        ctrl_card.main_layout.addLayout(status_h)
+        self._update_status_view("空闲待命")
 
-        # 快捷管理跳转卡片
-        quick_card = FluentCard("已配置任务速览", "前往【任务调度】页面可自由增删、调序与配置具体参数")
+        # 分割线 + 快捷队列概览与跳转
+        divider = QFrame()
+        divider.setFixedHeight(1)
+        divider.setStyleSheet("background-color: rgba(148, 163, 184, 32); border: none;")
+        ctrl_card.main_layout.addWidget(divider)
+
         quick_layout = QHBoxLayout()
-        self.dashboard_task_summary_label = QLabel("当前已就绪 0 个调度任务")
-        self.dashboard_task_summary_label.setStyleSheet("color: #E2E8F0; font-size: 13px; background: transparent;")
+        quick_layout.setSpacing(10)
+        summary_col = QVBoxLayout()
+        summary_col.setSpacing(2)
+        self.dashboard_task_summary_label = QLabel("已配置 0 个任务 · 已启用 0 个")
+        self.dashboard_task_summary_label.setStyleSheet("color: #E2E8F0; font-size: 12.5px; font-weight: 600; background: transparent;")
+        self.dashboard_queue_preview_label = QLabel("队列：暂未启用任何调度任务")
+        self.dashboard_queue_preview_label.setStyleSheet("color: #94A3B8; font-size: 11.5px; background: transparent;")
+        summary_col.addWidget(self.dashboard_task_summary_label)
+        summary_col.addWidget(self.dashboard_queue_preview_label)
+
         btn_goto_tasks = QPushButton("前往任务调度 一条龙 ➔")
+        btn_goto_tasks.setFixedHeight(32)
         btn_goto_tasks.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_goto_tasks.setStyleSheet("""
             QPushButton {
-                background-color: rgba(59, 130, 246, 35);
-                color: #60A5FA;
-                border: 1px solid #3B82F6;
-                border-radius: 6px;
-                padding: 6px 14px;
+                background-color: rgba(59, 130, 246, 28);
+                color: #93C5FD;
+                border: 1px solid rgba(96, 165, 250, 125);
+                border-radius: 8px;
+                padding: 0 14px;
+                font-size: 12px;
                 font-weight: 600;
             }
             QPushButton:hover {
-                background-color: rgba(59, 130, 246, 70);
+                background-color: rgba(59, 130, 246, 75);
+                border-color: #60A5FA;
                 color: #FFFFFF;
             }
         """)
         btn_goto_tasks.clicked.connect(lambda: self._switch_page(1))
-        quick_layout.addWidget(self.dashboard_task_summary_label, stretch=1)
+        quick_layout.addLayout(summary_col, stretch=1)
         quick_layout.addWidget(btn_goto_tasks)
-        quick_card.main_layout.addLayout(quick_layout)
-        layout.addWidget(quick_card)
+        ctrl_card.main_layout.addLayout(quick_layout)
+        layout.addWidget(ctrl_card)
+        layout.addStretch(1)
 
         self.stacked_widget.addWidget(page)
 
     def _build_tasks_page(self) -> None:
-        """页面 1：任务调度 (一条龙 Master-Detail) - 复刻 BetterGI 截图 1。"""
+        """页面 1：任务调度 (一条龙 Master-Detail)。"""
         page = QWidget()
         layout = QHBoxLayout(page)
         layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(10)
+        layout.setSpacing(12)
 
-        # ====== 左侧 Master 任务列表栏 (宽 320px) ======
+        # ====== 左侧 Master 任务列表栏 (宽 302px) ======
         master_frame = QFrame()
         master_frame.setObjectName("MasterPanel")
-        master_frame.setFixedWidth(320)
+        master_frame.setFixedWidth(302)
         master_frame.setStyleSheet("""
             QFrame#MasterPanel {
-                background-color: rgba(26, 30, 40, 230);
-                border: 1px solid rgba(60, 72, 92, 140);
-                border-radius: 10px;
+                background-color: rgba(15, 20, 34, 224);
+                border: 1px solid rgba(96, 130, 190, 84);
+                border-radius: 12px;
             }
         """)
         master_layout = QVBoxLayout(master_frame)
@@ -1355,27 +1708,40 @@ class MainWindow(QMainWindow):
 
         # Master 顶栏操作区
         master_header = QHBoxLayout()
-        master_title = QLabel("任务列表")
-        master_title.setStyleSheet("font-size: 15px; font-weight: bold; color: #FFFFFF; background: transparent; border: none;")
+        master_header.setSpacing(6)
+        master_title = QLabel("任务队列")
+        master_title.setStyleSheet("font-size: 14.5px; font-weight: 700; color: #F8FAFC; background: transparent; border: none;")
         master_header.addWidget(master_title)
+
+        self.tasks_count_badge = QLabel("0/0")
+        self.tasks_count_badge.setStyleSheet("""
+            background-color: rgba(59, 130, 246, 36);
+            color: #93C5FD;
+            border: 1px solid rgba(96, 165, 250, 95);
+            border-radius: 9px;
+            padding: 1px 7px;
+            font-size: 10.5px;
+            font-weight: 700;
+        """)
+        master_header.addWidget(self.tasks_count_badge)
         master_header.addStretch(1)
 
-        # 简洁清爽的添加按钮与一键启动按钮
         self.add_button = QPushButton("＋ 添加")
         self.add_button.setFixedHeight(28)
         self.add_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.add_button.setStyleSheet("""
             QPushButton {
-                background-color: rgba(48, 56, 70, 220);
-                color: #F1F5F9;
-                border: 1px solid rgba(80, 95, 120, 160);
-                border-radius: 6px;
+                background-color: rgba(30, 41, 59, 190);
+                color: #E2E8F0;
+                border: 1px solid rgba(100, 116, 139, 115);
+                border-radius: 7px;
                 padding: 0 10px;
                 font-weight: 600;
                 font-size: 12px;
             }
             QPushButton:hover {
-                background-color: rgba(65, 75, 95, 240);
+                background-color: rgba(51, 65, 85, 230);
+                border-color: rgba(148, 163, 184, 180);
                 color: #FFFFFF;
             }
         """)
@@ -1387,14 +1753,14 @@ class MainWindow(QMainWindow):
             QPushButton {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #3B82F6, stop:1 #2563EB);
                 color: #FFFFFF;
-                border: 1px solid #60A5FA;
-                border-radius: 6px;
+                border: 1px solid rgba(147, 197, 253, 155);
+                border-radius: 7px;
                 padding: 0 12px;
-                font-weight: bold;
+                font-weight: 700;
                 font-size: 12px;
             }
             QPushButton:hover {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #60A5FA, stop:1 #3B82F6);
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #60A5FA, stop:1 #1D4ED8);
             }
         """)
         self.tasks_page_start_button.clicked.connect(self.start_tasks)
@@ -1411,6 +1777,10 @@ class MainWindow(QMainWindow):
         master_header.addWidget(self.tasks_page_start_button)
         master_layout.addLayout(master_header)
 
+        master_hint = QLabel("拖拽左侧手柄调整顺序 · 右侧开关控制是否参与一条龙")
+        master_hint.setStyleSheet("font-size: 11px; color: #7C90B0; background: transparent; border: none;")
+        master_layout.addWidget(master_hint)
+
         # Master 拖拽任务列表区 (支持直接鼠标上下拖动调整优先级)
         self.task_list_widget = DraggableTaskListWidget()
         self.task_list_widget.order_changed.connect(self._on_task_order_dragged)
@@ -1421,12 +1791,14 @@ class MainWindow(QMainWindow):
         # ====== 右侧 Detail 任务配置卡片群 (滚动区域) ======
         detail_scroll = QScrollArea()
         detail_scroll.setWidgetResizable(True)
+        detail_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        detail_scroll.setFrameShape(QFrame.Shape.NoFrame)
         detail_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
 
         detail_container = QWidget()
         detail_container.setStyleSheet("background: transparent;")
         detail_layout = QVBoxLayout(detail_container)
-        detail_layout.setContentsMargins(0, 0, 4, 0)
+        detail_layout.setContentsMargins(0, 0, 6, 0)
         detail_layout.setSpacing(12)
 
         # 顶部配置预设管理栏
@@ -1436,59 +1808,58 @@ class MainWindow(QMainWindow):
         preset_layout.setSpacing(8)
 
         preset_label = QLabel("配置方案")
-        preset_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #60A5FA; background: transparent; border: none;")
+        preset_label.setStyleSheet("font-size: 13px; font-weight: 700; color: #93C5FD; background: transparent; border: none;")
         self.preset_combo = QComboBox()
         self.preset_combo.addItem("默认配置")
+        self.preset_combo.setMinimumWidth(110)
         self.preset_combo.setFixedHeight(34)
-        self.preset_combo.setStyleSheet("""
-            QComboBox {
-                background-color: rgba(30, 36, 48, 240);
-                color: #FFFFFF;
-                border: 1px solid rgba(80, 95, 120, 160);
-                border-radius: 6px;
-                padding: 4px 10px;
-                font-weight: 600;
-            }
-        """)
 
-        self.file_button = QPushButton("📁 导入 / 导出 ▼")
+        self.file_button = QPushButton("导入 / 导出")
         self.file_button.setFixedHeight(34)
         self.file_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.file_button.setStyleSheet("""
             QPushButton {
-                background-color: rgba(48, 56, 70, 220);
-                color: #F1F5F9;
-                border: 1px solid rgba(80, 95, 120, 140);
-                border-radius: 6px;
-                padding: 0 12px;
+                background-color: rgba(30, 41, 59, 185);
+                color: #E2E8F0;
+                border: 1px solid rgba(100, 116, 139, 115);
+                border-radius: 8px;
+                padding: 0 11px;
+                font-size: 12px;
                 font-weight: 600;
             }
             QPushButton:hover {
-                background-color: rgba(65, 75, 95, 240);
+                background-color: rgba(51, 65, 85, 225);
+                border-color: rgba(148, 163, 184, 175);
                 color: #FFFFFF;
             }
         """)
 
-        self.save_button = QPushButton("💾 保存当前配置")
+        self.save_button = QPushButton("保存配置")
         self.save_button.setFixedHeight(34)
         self.save_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.save_button.setStyleSheet("""
             QPushButton {
-                background-color: rgba(59, 130, 246, 35);
-                color: #60A5FA;
-                border: 1px solid #3B82F6;
-                border-radius: 6px;
-                padding: 0 14px;
-                font-weight: bold;
+                background-color: rgba(59, 130, 246, 38);
+                color: #93C5FD;
+                border: 1px solid rgba(96, 165, 250, 145);
+                border-radius: 8px;
+                padding: 0 13px;
+                font-size: 12px;
+                font-weight: 700;
             }
             QPushButton:hover {
-                background-color: #3B82F6;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #3B82F6, stop:1 #2563EB);
+                border-color: #93C5FD;
                 color: #FFFFFF;
             }
         """)
 
         self.export_config_button = QPushButton("导出配置")
         self.import_config_button = QPushButton("导入配置")
+        self.export_ui_params_button = QPushButton("导出UI参数")
+        self.import_ui_params_button = QPushButton("导入UI参数")
+        self.layout_tuner_button = QPushButton("布局调参")
+        self.layout_tuner_button.setVisible(False)
 
         preset_layout.addWidget(preset_label)
         preset_layout.addWidget(self.preset_combo, stretch=1)
@@ -1497,79 +1868,96 @@ class MainWindow(QMainWindow):
         preset_card.main_layout.addLayout(preset_layout)
         detail_layout.addWidget(preset_card)
 
-        # 辅助创建高对比度表单标签
-        def make_lbl(t: str) -> QLabel:
+        def make_lbl(t: str, width: int | None = 96) -> QLabel:
             lbl = QLabel(t)
-            lbl.setStyleSheet("font-size: 13px; font-weight: 600; color: #F1F5F9; background: transparent; border: none;")
+            if width is not None:
+                lbl.setFixedWidth(width)
+            lbl.setStyleSheet("font-size: 12px; font-weight: 600; color: #CBD5E1; background: transparent; border: none;")
             return lbl
 
-        # Detail 卡片 1：基础参数配置
-        basic_card = FluentCard("基础运行参数", "设置脚本名称、运行路径与最大执行时间")
-        basic_form = QVBoxLayout()
-        basic_form.setSpacing(10)
+        def make_sub_row() -> tuple[QFrame, QHBoxLayout]:
+            box = QFrame()
+            box.setObjectName("DetailSubRow")
+            box.setStyleSheet("""
+                QFrame#DetailSubRow {
+                    background-color: rgba(22, 29, 46, 138);
+                    border: 1px solid rgba(148, 163, 184, 30);
+                    border-radius: 9px;
+                }
+            """)
+            row = QHBoxLayout(box)
+            row.setContentsMargins(10, 8, 10, 8)
+            row.setSpacing(8)
+            return box, row
 
-        # 任务名称
-        row_name = QHBoxLayout()
-        row_name.addWidget(make_lbl("任务名称："))
+        # Detail 卡片 1：基础参数配置
+        basic_card = FluentCard("基础运行参数", "设置脚本名称、运行路径、启动参数与最大执行时间")
+        basic_form = QVBoxLayout()
+        basic_form.setSpacing(8)
+
+        box_name, row_name = make_sub_row()
+        row_name.addWidget(make_lbl("任务名称"))
         self.detail_name_edit = QLineEdit()
+        self.detail_name_edit.setMinimumWidth(80)
         self.detail_name_edit.setPlaceholderText("例如: 自动一条龙 / 每日委托")
         row_name.addWidget(self.detail_name_edit, stretch=1)
-        basic_form.addLayout(row_name)
+        basic_form.addWidget(box_name)
 
-        # 脚本路径
-        row_path = QHBoxLayout()
-        row_path.addWidget(make_lbl("脚本路径："))
+        box_path, row_path = make_sub_row()
+        row_path.addWidget(make_lbl("脚本路径"))
         self.detail_path_edit = QLineEdit()
-        self.detail_path_edit.setPlaceholderText("可执行文件 / Python 脚本 / 启动器路径")
-        self.detail_browse_btn = QPushButton("📁 浏览文件...")
+        self.detail_path_edit.setMinimumWidth(80)
+        self.detail_path_edit.setPlaceholderText("可执行文件 / 脚本 / 启动器路径")
+        self.detail_browse_btn = QPushButton("浏览...")
+        self.detail_browse_btn.setFixedHeight(30)
         self.detail_browse_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.detail_browse_btn.setStyleSheet("""
             QPushButton {
-                background-color: rgba(48, 56, 70, 220);
+                background-color: rgba(30, 41, 59, 190);
                 color: #E2E8F0;
-                border: 1px solid rgba(80, 95, 120, 140);
-                border-radius: 6px;
-                padding: 4px 12px;
+                border: 1px solid rgba(100, 116, 139, 115);
+                border-radius: 7px;
+                padding: 0 11px;
+                font-size: 12px;
                 font-weight: 600;
             }
             QPushButton:hover {
-                background-color: rgba(65, 75, 95, 240);
+                background-color: rgba(51, 65, 85, 225);
                 color: #FFFFFF;
             }
         """)
         row_path.addWidget(self.detail_path_edit, stretch=1)
         row_path.addWidget(self.detail_browse_btn)
-        basic_form.addLayout(row_path)
+        basic_form.addWidget(box_path)
 
-        # 启动参数
-        row_args = QHBoxLayout()
-        row_args.addWidget(make_lbl("启用命令/参数："))
+        box_args, row_args = make_sub_row()
+        row_args.addWidget(make_lbl("启用命令参数"))
         self.detail_args_switch = SwitchButton()
         row_args.addWidget(self.detail_args_switch)
-        row_args.addSpacing(10)
-        row_args.addWidget(make_lbl("命令行参数："))
+        row_args.addSpacing(8)
+        row_args.addWidget(make_lbl("启动参数", width=None))
         self.detail_args_edit = QLineEdit()
-        self.detail_args_edit.setPlaceholderText("启动参数，例如: --auto --task daily")
+        self.detail_args_edit.setMinimumWidth(80)
+        self.detail_args_edit.setPlaceholderText("例如: -t 1 -e 或 --auto")
         row_args.addWidget(self.detail_args_edit, stretch=1)
-        basic_form.addLayout(row_args)
+        basic_form.addWidget(box_args)
 
-        # 执行顺序与超时时间
-        row_order = QHBoxLayout()
-        row_order.addWidget(make_lbl("运行顺序："))
+        box_order, row_order = make_sub_row()
+        row_order.addWidget(make_lbl("运行顺序"))
         self.detail_order_spin = QSpinBox()
         self.detail_order_spin.setRange(1, 999)
-        self.detail_order_spin.setFixedWidth(80)
+        self.detail_order_spin.setFixedWidth(84)
         row_order.addWidget(self.detail_order_spin)
-        row_order.addSpacing(20)
-        row_order.addWidget(make_lbl("最大运行时间："))
+        row_order.addSpacing(16)
+        row_order.addWidget(make_lbl("最大运行时间", width=None))
         self.detail_timeout_spin = QSpinBox()
         self.detail_timeout_spin.setRange(0, 9999)
         self.detail_timeout_spin.setSuffix(" 分钟")
         self.detail_timeout_spin.setValue(30)
-        self.detail_timeout_spin.setFixedWidth(110)
+        self.detail_timeout_spin.setFixedWidth(112)
         row_order.addWidget(self.detail_timeout_spin)
         row_order.addStretch(1)
-        basic_form.addLayout(row_order)
+        basic_form.addWidget(box_order)
 
         basic_card.main_layout.addLayout(basic_form)
         detail_layout.addWidget(basic_card)
@@ -1577,23 +1965,29 @@ class MainWindow(QMainWindow):
         # Detail 卡片 2：超时与调度策略
         timeout_card = FluentCard("超时与调度策略", "当脚本超出最大执行时间时的处理方案")
         timeout_form = QVBoxLayout()
-        timeout_form.setSpacing(10)
+        timeout_form.setSpacing(8)
 
-        row_to = QHBoxLayout()
-        row_to.addWidget(make_lbl("超时处理方式："))
+        box_to, row_to = make_sub_row()
+        row_to.addWidget(make_lbl("超时处理方式"))
         self.detail_action_combo = QComboBox()
+        self.detail_action_combo.setMinimumWidth(100)
         for k, v in TIMEOUT_ACTIONS.items():
             self.detail_action_combo.addItem(v, k)
         row_to.addWidget(self.detail_action_combo, stretch=1)
-        timeout_form.addLayout(row_to)
+        timeout_form.addWidget(box_to)
 
-        row_enter = QHBoxLayout()
-        row_enter.addWidget(make_lbl("自动按 Enter 确认延时："))
+        box_enter, row_enter = make_sub_row()
+        row_enter.addWidget(make_lbl("自动 Enter 延时"))
         self.detail_enter_delay_spin = QSpinBox()
         self.detail_enter_delay_spin.setRange(0, 3600)
-        self.detail_enter_delay_spin.setSuffix(" 秒 (0为不自动按)")
-        row_enter.addWidget(self.detail_enter_delay_spin, stretch=1)
-        timeout_form.addLayout(row_enter)
+        self.detail_enter_delay_spin.setSuffix(" 秒")
+        self.detail_enter_delay_spin.setFixedWidth(112)
+        row_enter.addWidget(self.detail_enter_delay_spin)
+        enter_hint = QLabel("0 秒表示不自动按 Enter")
+        enter_hint.setStyleSheet("font-size: 11px; color: #7C90B0; background: transparent; border: none;")
+        row_enter.addWidget(enter_hint)
+        row_enter.addStretch(1)
+        timeout_form.addWidget(box_enter)
 
         timeout_card.main_layout.addLayout(timeout_form)
         detail_layout.addWidget(timeout_card)
@@ -1601,22 +1995,24 @@ class MainWindow(QMainWindow):
         # Detail 卡片 3：完成判断与等待策略
         wait_card = FluentCard("完成判断与等待策略", "判断本任务是否已经顺利执行完毕")
         wait_form = QVBoxLayout()
-        wait_form.setSpacing(10)
+        wait_form.setSpacing(8)
 
-        row_wm = QHBoxLayout()
-        row_wm.addWidget(make_lbl("完成判断方式："))
+        box_wm, row_wm = make_sub_row()
+        row_wm.addWidget(make_lbl("完成判断方式"))
         self.detail_wait_mode_combo = QComboBox()
+        self.detail_wait_mode_combo.setMinimumWidth(100)
         for k, v in WAIT_MODES.items():
             self.detail_wait_mode_combo.addItem(v, k)
         row_wm.addWidget(self.detail_wait_mode_combo, stretch=1)
-        wait_form.addLayout(row_wm)
+        wait_form.addWidget(box_wm)
 
-        row_wp = QHBoxLayout()
-        row_wp.addWidget(make_lbl("等待关键词/进程名："))
+        box_wp, row_wp = make_sub_row()
+        row_wp.addWidget(make_lbl("等待进程名"))
         self.detail_wait_process_edit = QLineEdit()
-        self.detail_wait_process_edit.setPlaceholderText("用于进程出现/消失判断，例如: Endfield.exe")
+        self.detail_wait_process_edit.setMinimumWidth(80)
+        self.detail_wait_process_edit.setPlaceholderText("例如: Endfield.exe")
         row_wp.addWidget(self.detail_wait_process_edit, stretch=1)
-        wait_form.addLayout(row_wp)
+        wait_form.addWidget(box_wp)
 
         wait_card.main_layout.addLayout(wait_form)
         detail_layout.addWidget(wait_card)
@@ -1624,59 +2020,81 @@ class MainWindow(QMainWindow):
         # Detail 卡片 4：进阶与守护策略
         adv_card = FluentCard("进阶与守护策略", "多任务并发、外部进程守护与窗口清理")
         adv_form = QVBoxLayout()
-        adv_form.setSpacing(10)
+        adv_form.setSpacing(8)
 
-        row_wd = QHBoxLayout()
-        row_wd.addWidget(make_lbl("启用守护监控："))
+        box_wd, row_wd = make_sub_row()
+        row_wd.addWidget(make_lbl("启用守护监控"))
         self.detail_watchdog_switch = SwitchButton()
         row_wd.addWidget(self.detail_watchdog_switch)
+        wd_hint = QLabel("异常消失时自动推进")
+        wd_hint.setStyleSheet("font-size: 11px; color: #7C90B0; background: transparent; border: none;")
+        row_wd.addWidget(wd_hint)
         row_wd.addStretch(1)
-        adv_form.addLayout(row_wd)
+        adv_form.addWidget(box_wd)
 
-        row_cg = QHBoxLayout()
-        row_cg.addWidget(make_lbl("并发组名："))
+        box_cg, row_cg = make_sub_row()
+        row_cg.addWidget(make_lbl("并发组名"))
         self.detail_concurrent_group_edit = QLineEdit()
-        self.detail_concurrent_group_edit.setPlaceholderText("相同组名任务将并发启动")
+        self.detail_concurrent_group_edit.setMinimumWidth(70)
+        self.detail_concurrent_group_edit.setPlaceholderText("同组并发")
         row_cg.addWidget(self.detail_concurrent_group_edit, stretch=1)
-        row_cg.addSpacing(10)
-        row_cg.addWidget(make_lbl("组完成策略："))
+        row_cg.addSpacing(6)
+        row_cg.addWidget(make_lbl("完成策略", width=None))
         self.detail_concurrent_policy_combo = QComboBox()
+        self.detail_concurrent_policy_combo.setMinimumWidth(90)
         for k, v in CONCURRENT_POLICIES.items():
             self.detail_concurrent_policy_combo.addItem(v, k)
         row_cg.addWidget(self.detail_concurrent_policy_combo, stretch=1)
-        adv_form.addLayout(row_cg)
+        adv_form.addWidget(box_cg)
 
-        row_pk = QHBoxLayout()
-        row_pk.addWidget(make_lbl("目标进程关键词："))
+        box_pk, row_pk = make_sub_row()
+        row_pk.addWidget(make_lbl("进程关键词"))
         self.detail_process_keywords_edit = QLineEdit()
-        self.detail_process_keywords_edit.setPlaceholderText("多个用逗号隔开，例如: Endfield.exe, OK-WW")
+        self.detail_process_keywords_edit.setMinimumWidth(80)
+        self.detail_process_keywords_edit.setPlaceholderText("逗号隔开，例如: Endfield.exe, OK-WW")
         row_pk.addWidget(self.detail_process_keywords_edit, stretch=1)
-        adv_form.addLayout(row_pk)
+        adv_form.addWidget(box_pk)
 
-        row_wk = QHBoxLayout()
-        row_wk.addWidget(make_lbl("游戏窗口关键词："))
+        box_wk, row_wk = make_sub_row()
+        row_wk.addWidget(make_lbl("窗口关键词"))
         self.detail_window_keywords_edit = QLineEdit()
-        self.detail_window_keywords_edit.setPlaceholderText("多个用逗号隔开，例如: 鸣潮, 星穹铁道")
+        self.detail_window_keywords_edit.setMinimumWidth(80)
+        self.detail_window_keywords_edit.setPlaceholderText("逗号隔开，例如: 鸣潮, 星穹铁道")
         row_wk.addWidget(self.detail_window_keywords_edit, stretch=1)
-        adv_form.addLayout(row_wk)
+        adv_form.addWidget(box_wk)
+
+        box_grace, row_grace = make_sub_row()
+        row_grace.addWidget(make_lbl("消失确认延时"))
+        self.detail_monitor_grace_spin = QSpinBox()
+        self.detail_monitor_grace_spin.setRange(1, 3600)
+        self.detail_monitor_grace_spin.setSuffix(" 秒")
+        self.detail_monitor_grace_spin.setFixedWidth(112)
+        self.detail_monitor_grace_spin.setToolTip("窗口或目标进程连续消失这么久后，才进入下一个任务。")
+        row_grace.addWidget(self.detail_monitor_grace_spin)
+        grace_hint = QLabel("目标连续消失该时长后切下一任务")
+        grace_hint.setStyleSheet("font-size: 11px; color: #7C90B0; background: transparent; border: none;")
+        row_grace.addWidget(grace_hint)
+        row_grace.addStretch(1)
+        adv_form.addWidget(box_grace)
 
         # 底部删除任务按钮
         del_task_btn_row = QHBoxLayout()
         del_task_btn_row.addStretch(1)
-        self.card_delete_task_button = QPushButton("🗑  删除此任务")
+        self.card_delete_task_button = QPushButton("删除此任务")
         self.card_delete_task_button.setFixedHeight(32)
         self.card_delete_task_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.card_delete_task_button.setStyleSheet("""
             QPushButton {
-                background-color: rgba(220, 38, 38, 25);
-                color: #F87171;
-                border: 1px solid rgba(239, 68, 68, 100);
-                border-radius: 6px;
-                padding: 0 16px;
+                background-color: rgba(239, 68, 68, 28);
+                color: #FCA5A5;
+                border: 1px solid rgba(248, 113, 113, 110);
+                border-radius: 8px;
+                padding: 0 18px;
                 font-weight: 600;
             }
             QPushButton:hover {
-                background-color: rgba(220, 38, 38, 70);
+                background-color: rgba(220, 38, 38, 165);
+                border-color: #FCA5A5;
                 color: #FFFFFF;
             }
         """)
@@ -1711,6 +2129,7 @@ class MainWindow(QMainWindow):
         self.detail_concurrent_policy_combo.currentIndexChanged.connect(lambda _i: self._sync_current_detail_to_task())
         self.detail_process_keywords_edit.textEdited.connect(self._sync_current_detail_to_task)
         self.detail_window_keywords_edit.textEdited.connect(self._sync_current_detail_to_task)
+        self.detail_monitor_grace_spin.valueChanged.connect(lambda _v: self._sync_current_detail_to_task())
         self.detail_browse_btn.clicked.connect(self._on_detail_browse_file)
 
         self.stacked_widget.addWidget(page)
@@ -1720,26 +2139,80 @@ class MainWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(10)
+        layout.setSpacing(12)
 
-        card = FluentCard("运行耗时统计", "记录各项脚本的执行次数、平均耗时与最近完成时间")
+        # 顶部 3 枚 KPI 概览卡（与启动中心/手机桌面小组件同风格）
+        kpi_row = QHBoxLayout()
+        kpi_row.setSpacing(12)
+
+        def make_kpi_card(caption: str, initial: str, accent: str, accent_rgb: str) -> QLabel:
+            box = QFrame()
+            box.setObjectName("StatKpiCard")
+            box.setFixedHeight(84)
+            box.setStyleSheet(f"""
+                QFrame#StatKpiCard {{
+                    background-color: rgba(15, 20, 34, 224);
+                    border: 1px solid rgba({accent_rgb}, 82);
+                    border-radius: 12px;
+                }}
+                QLabel {{
+                    background: transparent;
+                    border: none;
+                }}
+            """)
+            v = QVBoxLayout(box)
+            v.setContentsMargins(14, 10, 14, 10)
+            v.setSpacing(6)
+
+            stripe = QFrame()
+            stripe.setFixedHeight(2)
+            stripe.setStyleSheet(f"""
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 rgba({accent_rgb}, 230),
+                    stop:0.65 rgba({accent_rgb}, 90),
+                    stop:1 rgba({accent_rgb}, 10));
+                border: none;
+                border-radius: 1px;
+            """)
+            v.addWidget(stripe)
+
+            lbl_cap = QLabel(caption)
+            lbl_cap.setStyleSheet("color: #94A3B8; font-size: 11.5px; font-weight: 600;")
+            lbl_val = QLabel(initial)
+            lbl_val.setStyleSheet(
+                f"color: {accent}; font-size: 20px; font-weight: 800; font-family: 'Cascadia Code', Consolas, sans-serif;"
+            )
+            v.addWidget(lbl_cap)
+            v.addWidget(lbl_val)
+            kpi_row.addWidget(box, stretch=1)
+            return lbl_val
+
+        self.stats_total_runs_label = make_kpi_card("累计执行次数", "0 次", "#2DD4BF", "45, 212, 191")
+        self.stats_script_count_label = make_kpi_card("已统计脚本数", "0 个", "#60A5FA", "96, 165, 250")
+        self.stats_last_run_label = make_kpi_card("最近完成时间", "—", "#C4B5FD", "167, 139, 250")
+        layout.addLayout(kpi_row)
+
+        card = FluentCard("运行耗时明细", "记录各项脚本的执行次数、平均耗时、最近耗时与完成时间")
         btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
         self.refresh_stats_button = QPushButton("刷新统计")
         self.open_stats_button = QPushButton("打开统计目录")
         for b in [self.refresh_stats_button, self.open_stats_button]:
-            b.setFixedHeight(34)
+            b.setFixedHeight(32)
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.setStyleSheet("""
                 QPushButton {
-                    background-color: rgba(48, 56, 70, 220);
+                    background-color: rgba(30, 41, 59, 185);
                     color: #E2E8F0;
-                    border: 1px solid rgba(80, 95, 120, 140);
-                    border-radius: 6px;
+                    border: 1px solid rgba(100, 116, 139, 115);
+                    border-radius: 8px;
                     padding: 0 14px;
+                    font-size: 12px;
                     font-weight: 600;
                 }
                 QPushButton:hover {
-                    background-color: rgba(65, 75, 95, 240);
+                    background-color: rgba(51, 65, 85, 225);
+                    border-color: rgba(148, 163, 184, 175);
                     color: #FFFFFF;
                 }
             """)
@@ -1748,8 +2221,10 @@ class MainWindow(QMainWindow):
         card.main_layout.addLayout(btn_row)
 
         self.stats_table = QTableWidget(0, 5)
-        self.stats_table.setHorizontalHeaderLabels(["脚本名称", "次数", "平均耗时", "最近耗时", "最近完成时间"])
+        self.stats_table.setHorizontalHeaderLabels(["脚本名称", "执行次数", "平均耗时", "最近耗时", "最近完成时间"])
         self.stats_table.verticalHeader().setVisible(False)
+        self.stats_table.verticalHeader().setDefaultSectionSize(38)
+        self.stats_table.setShowGrid(False)
         self.stats_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.stats_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.stats_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -1758,9 +2233,9 @@ class MainWindow(QMainWindow):
         stats_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         for col in range(1, 5):
             stats_header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
-        card.main_layout.addWidget(self.stats_table)
+        card.main_layout.addWidget(self.stats_table, stretch=1)
 
-        layout.addWidget(card)
+        layout.addWidget(card, stretch=1)
         self.stacked_widget.addWidget(page)
 
     def _build_logs_page(self) -> None:
@@ -1770,25 +2245,46 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(10)
 
-        card = FluentCard("运行日志终端", "实时输出脚本运行控制台日志")
+        card = FluentCard("运行日志终端", "实时捕获调度器事件与脚本控制台输出")
         btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+
+        live_pill = QFrame()
+        live_pill.setStyleSheet("""
+            background-color: rgba(16, 185, 129, 28);
+            border: 1px solid rgba(52, 211, 153, 95);
+            border-radius: 10px;
+        """)
+        live_l = QHBoxLayout(live_pill)
+        live_l.setContentsMargins(9, 4, 10, 4)
+        live_l.setSpacing(5)
+        live_dot = QLabel("●")
+        live_dot.setStyleSheet("color: #34D399; font-size: 9px; background: transparent; border: none;")
+        live_txt = QLabel("实时日志流")
+        live_txt.setStyleSheet("color: #6EE7B7; font-size: 11.5px; font-weight: 700; background: transparent; border: none;")
+        live_l.addWidget(live_dot)
+        live_l.addWidget(live_txt)
+        btn_row.addWidget(live_pill)
+
         self.clear_log_button = QPushButton("清空日志")
         self.copy_log_button = QPushButton("复制全部")
         self.open_log_dir_button = QPushButton("打开日志目录")
         for b in [self.clear_log_button, self.copy_log_button, self.open_log_dir_button]:
-            b.setFixedHeight(34)
+            b.setFixedHeight(32)
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.setStyleSheet("""
                 QPushButton {
-                    background-color: rgba(48, 56, 70, 220);
+                    background-color: rgba(30, 41, 59, 185);
                     color: #E2E8F0;
-                    border: 1px solid rgba(80, 95, 120, 140);
-                    border-radius: 6px;
+                    border: 1px solid rgba(100, 116, 139, 115);
+                    border-radius: 8px;
                     padding: 0 14px;
+                    font-size: 12px;
                     font-weight: 600;
                 }
                 QPushButton:hover {
-                    background-color: rgba(65, 75, 95, 240);
+                    background-color: rgba(51, 65, 85, 225);
+                    border-color: rgba(148, 163, 184, 175);
                     color: #FFFFFF;
                 }
             """)
@@ -1801,46 +2297,69 @@ class MainWindow(QMainWindow):
         self.log_edit.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
         self.log_edit.setStyleSheet("""
             QTextEdit {
-                background-color: rgba(18, 21, 28, 240);
-                color: #E2E8F0;
-                border: 1px solid rgba(50, 60, 80, 160);
-                border-radius: 8px;
+                background-color: rgba(10, 14, 24, 240);
+                color: #A7F3D0;
+                border: 1px solid rgba(96, 130, 190, 82);
+                border-radius: 10px;
                 font-family: 'Cascadia Code', Consolas, 'Segoe UI Mono', monospace;
                 font-size: 12.5px;
-                padding: 10px;
+                padding: 12px;
             }
         """)
-        card.main_layout.addWidget(self.log_edit)
+        card.main_layout.addWidget(self.log_edit, stretch=1)
 
         layout.addWidget(card)
         self.stacked_widget.addWidget(page)
 
     def _build_settings_page(self) -> None:
-        """页面 4：全局设置 (Settings) - 现代 Fluent Toggle Switch 切换开关风格。"""
+        """页面 4：全局设置 (Settings) - 分层子卡片 + 开关控制风格。"""
         page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(4, 4, 4, 4)
+        outer_layout = QVBoxLayout(page)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+
+        container = QWidget()
+        container.setStyleSheet("background: transparent;")
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(4, 4, 6, 4)
         layout.setSpacing(12)
 
-        def make_switch_row(title: str, desc: str, switch_btn: SwitchButton) -> QWidget:
-            w = QWidget()
-            h = QHBoxLayout(w)
-            h.setContentsMargins(8, 6, 8, 6)
-            h.setSpacing(12)
+        def make_setting_row(title: str, desc: str, right_widget: QWidget) -> QFrame:
+            box = QFrame()
+            box.setObjectName("SettingsItemRow")
+            box.setStyleSheet("""
+                QFrame#SettingsItemRow {
+                    background-color: rgba(22, 29, 46, 148);
+                    border: 1px solid rgba(148, 163, 184, 30);
+                    border-radius: 9px;
+                }
+                QFrame#SettingsItemRow:hover {
+                    background-color: rgba(28, 37, 58, 175);
+                    border-color: rgba(96, 165, 250, 75);
+                }
+            """)
+            h = QHBoxLayout(box)
+            h.setContentsMargins(14, 10, 14, 10)
+            h.setSpacing(14)
 
             v = QVBoxLayout()
             v.setSpacing(2)
             lbl_title = QLabel(title)
-            lbl_title.setStyleSheet("font-size: 13.5px; font-weight: 600; color: #F1F5F9; background: transparent; border: none;")
+            lbl_title.setStyleSheet("font-size: 13px; font-weight: 600; color: #F1F5F9; background: transparent; border: none;")
             v.addWidget(lbl_title)
             if desc:
                 lbl_desc = QLabel(desc)
-                lbl_desc.setStyleSheet("font-size: 12px; color: #94A3B8; background: transparent; border: none;")
+                lbl_desc.setStyleSheet("font-size: 11.5px; color: #8CA0BE; background: transparent; border: none;")
                 v.addWidget(lbl_desc)
 
             h.addLayout(v, stretch=1)
-            h.addWidget(switch_btn)
-            return w
+            h.addWidget(right_widget)
+            return box
 
         # 卡片 1：自动化与启动策略
         card1 = FluentCard("自动化与启动策略", "配置系统开机自启与自动执行选项")
@@ -1850,10 +2369,33 @@ class MainWindow(QMainWindow):
         self.windows_startup_checkbox = SwitchButton()
         self.auto_start_tasks_checkbox = SwitchButton()
         self.timeout_screenshot_checkbox = SwitchButton()
+        self.check_updates_checkbox = SwitchButton()
+        self.updates_button = QPushButton("脚本更新")
+        self.updates_button.setFixedHeight(32)
+        self.updates_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.updates_button.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(59, 130, 246, 36);
+                color: #93C5FD;
+                border: 1px solid rgba(96, 165, 250, 135);
+                border-radius: 8px;
+                padding: 0 14px;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: rgba(59, 130, 246, 85);
+                border-color: #93C5FD;
+                color: #FFFFFF;
+            }
+        """)
+        self.updates_button.clicked.connect(self.show_updates)
 
-        f1.addWidget(make_switch_row("Windows 开机自启动本程序", "系统登录时自动在后台启动本程序", self.windows_startup_checkbox))
-        f1.addWidget(make_switch_row("程序启动后自动开始执行任务", "软件打开后无需手动点击，自动进入任务调度流程", self.auto_start_tasks_checkbox))
-        f1.addWidget(make_switch_row("超时处理时自动保存前后屏幕截图", "当任务发生超时异常时，自动截屏存入日志目录便于排查", self.timeout_screenshot_checkbox))
+        f1.addWidget(make_setting_row("Windows 开机自启动本程序", "系统登录时自动在后台启动本程序", self.windows_startup_checkbox))
+        f1.addWidget(make_setting_row("程序启动后自动开始执行任务", "软件打开后无需手动点击，自动进入任务调度流程", self.auto_start_tasks_checkbox))
+        f1.addWidget(make_setting_row("超时处理时自动保存前后屏幕截图", "当任务发生超时异常时，自动截屏存入日志目录便于排查", self.timeout_screenshot_checkbox))
+        f1.addWidget(make_setting_row("启动脚本前自动检查并更新", "更新完成后自动开始任务，检查或更新失败时暂停启动", self.check_updates_checkbox))
+        f1.addWidget(make_setting_row("脚本更新管理", "查看脚本版本与可用更新", self.updates_button))
         card1.main_layout.addLayout(f1)
         layout.addWidget(card1)
 
@@ -1865,35 +2407,26 @@ class MainWindow(QMainWindow):
         self.shutdown_checkbox = SwitchButton()
         self.auto_exit_checkbox = SwitchButton()
 
-        f2.addWidget(make_switch_row("所有任务完成后自动关机", "全部任务执行完毕后触发安全关机倒计时", self.shutdown_checkbox))
+        f2.addWidget(make_setting_row("所有任务完成后自动关机", "全部任务执行完毕后触发安全关机倒计时", self.shutdown_checkbox))
 
-        # 关机倒计时行
-        r_shut = QHBoxLayout()
-        r_shut.setContentsMargins(8, 2, 8, 2)
-        lbl_delay = QLabel("关机倒计时：")
-        lbl_delay.setStyleSheet("font-size: 13.5px; font-weight: 600; color: #F1F5F9; background: transparent; border: none;")
-        r_shut.addWidget(lbl_delay)
         self.shutdown_delay_spin = QSpinBox()
         self.shutdown_delay_spin.setRange(0, 24 * 3600)
         self.shutdown_delay_spin.setSuffix(" 秒")
         self.shutdown_delay_spin.setSingleStep(10)
-        self.shutdown_delay_spin.setFixedWidth(110)
-        r_shut.addWidget(self.shutdown_delay_spin)
-        r_shut.addStretch(1)
-        f2.addLayout(r_shut)
+        self.shutdown_delay_spin.setFixedWidth(130)
+        f2.addWidget(make_setting_row("关机等待倒计时", "触发关机前的安全缓冲时间，期间可在启动中心随时取消", self.shutdown_delay_spin))
 
-        f2.addWidget(make_switch_row("所有任务完成后自动退出程序", "全部调度任务顺利结束后自动关闭本程序窗口", self.auto_exit_checkbox))
+        f2.addWidget(make_setting_row("所有任务完成后自动退出程序", "全部调度任务顺利结束后自动关闭本程序窗口", self.auto_exit_checkbox))
         card2.main_layout.addLayout(f2)
         layout.addWidget(card2)
 
         # 卡片 3：界面主题与外观
-        card3 = FluentCard("界面主题与外观", "个性化切换主界面主题色彩")
-        f3 = QHBoxLayout()
-        f3.setContentsMargins(8, 6, 8, 6)
-        lbl_theme = QLabel("当前主题：")
-        lbl_theme.setStyleSheet("font-size: 13.5px; font-weight: 600; color: #F1F5F9; background: transparent; border: none;")
-        f3.addWidget(lbl_theme)
+        card3 = FluentCard("界面主题与外观", "个性化切换主界面背景与视觉配色")
+        f3 = QVBoxLayout()
+        f3.setSpacing(8)
+
         self.theme_combo = QComboBox()
+        self.theme_combo.setFixedWidth(210)
         self.theme_combo.addItem("经典风 (推荐)", "jiansz")
         self.theme_combo.addItem("深色模式", "dark")
         self.theme_combo.addItem("浅色模式", "light")
@@ -1902,13 +2435,23 @@ class MainWindow(QMainWindow):
         self.theme_combo.addItem("暖色幻想风", "fantasy")
         self.theme_label = QLabel("当前主题：-")
         self.theme_label.setVisible(False)
-        f3.addWidget(self.theme_combo)
-        f3.addStretch(1)
+        f3.addWidget(make_setting_row("当前主题风格", "实时切换背景壁纸与全局配色主题并自动保存", self.theme_combo))
         card3.main_layout.addLayout(f3)
         layout.addWidget(card3)
 
         layout.addStretch(1)
+        scroll.setWidget(container)
+        outer_layout.addWidget(scroll)
         self.stacked_widget.addWidget(page)
+
+    def _task_subtitle_text(self, idx: int, task: TaskConfig) -> str:
+        """生成左侧任务卡片的紧凑副标题摘要。"""
+        parts = [f"#{idx + 1}", f"{task.timeout_minutes}分钟"]
+        if task.concurrent_group:
+            parts.append(f"组:{task.concurrent_group}")
+        elif task.enable_watchdog:
+            parts.append("守护监控")
+        return " · ".join(parts)
 
     def _render_master_task_list(self) -> None:
         """根据 self.tasks_list 动态渲染左侧 Master 拖拽任务卡片列表。"""
@@ -1918,10 +2461,23 @@ class MainWindow(QMainWindow):
 
         for idx, task in enumerate(self.tasks_list):
             item = QListWidgetItem(self.task_list_widget)
-            item.setSizeHint(QSize(0, 48))
+            item.setSizeHint(QSize(0, 58))
             item.setData(Qt.ItemDataRole.UserRole, idx)
 
-            item_widget = MasterTaskItemWidget(idx, task.name, task.enabled, self.task_list_widget)
+            icon_path = _task_game_icon_path(
+                self.base_dir,
+                task.name,
+                getattr(task, "script_path", ""),
+                getattr(task, "window_keywords", None),
+            )
+            item_widget = MasterTaskItemWidget(
+                idx,
+                task.name,
+                task.enabled,
+                self.task_list_widget,
+                subtitle=self._task_subtitle_text(idx, task),
+                icon_path=icon_path,
+            )
             item_widget.clicked.connect(self._on_master_task_clicked)
             item_widget.toggled.connect(self._on_master_task_toggled)
 
@@ -1931,15 +2487,18 @@ class MainWindow(QMainWindow):
 
         self.task_list_widget.blockSignals(False)
 
+        if hasattr(self, "tasks_count_badge"):
+            enabled_cnt = sum(1 for t in self.tasks_list if t.enabled)
+            self.tasks_count_badge.setText(f"{enabled_cnt}/{len(self.tasks_list)}")
+
         if self.tasks_list:
             idx = max(0, min(self.current_task_idx, len(self.tasks_list) - 1))
             self._select_master_task(idx, load_detail=True)
         else:
             self._clear_detail_form()
 
-        # 更新 Dashboard 上的速览数字
-        enabled_count = sum(1 for t in self.tasks_list if t.enabled)
-        self.dashboard_task_summary_label.setText(f"当前已配置 {len(self.tasks_list)} 个任务，其中已启用 {enabled_count} 个")
+        # 更新 Dashboard 上的速览数字与任务队列预览
+        self._update_dashboard_task_overview()
 
     def _on_task_order_dragged(self) -> None:
         """用户鼠标拖拽放下后，重新排列表格与数据优先级。"""
@@ -1979,8 +2538,7 @@ class MainWindow(QMainWindow):
         if 0 <= index < len(self.tasks_list):
             self.tasks_list[index].enabled = enabled
             self.save_config_from_ui()
-            enabled_count = sum(1 for t in self.tasks_list if t.enabled)
-            self.dashboard_task_summary_label.setText(f"当前已配置 {len(self.tasks_list)} 个任务，其中已启用 {enabled_count} 个")
+            self._update_dashboard_task_overview()
 
     def _load_task_detail_to_form(self, task: TaskConfig) -> None:
         """将选中的 TaskConfig 属性填充至右侧表单。"""
@@ -1999,6 +2557,7 @@ class MainWindow(QMainWindow):
         self.detail_concurrent_policy_combo.blockSignals(True)
         self.detail_process_keywords_edit.blockSignals(True)
         self.detail_window_keywords_edit.blockSignals(True)
+        self.detail_monitor_grace_spin.blockSignals(True)
 
         self.detail_name_edit.setText(task.name)
         self.detail_path_edit.setText(task.script_path)
@@ -2027,6 +2586,7 @@ class MainWindow(QMainWindow):
 
         self.detail_process_keywords_edit.setText(", ".join(task.process_keywords))
         self.detail_window_keywords_edit.setText(", ".join(task.window_keywords))
+        self.detail_monitor_grace_spin.setValue(task.monitor_absent_grace_seconds)
 
         self.detail_name_edit.blockSignals(False)
         self.detail_path_edit.blockSignals(False)
@@ -2043,6 +2603,7 @@ class MainWindow(QMainWindow):
         self.detail_concurrent_policy_combo.blockSignals(False)
         self.detail_process_keywords_edit.blockSignals(False)
         self.detail_window_keywords_edit.blockSignals(False)
+        self.detail_monitor_grace_spin.blockSignals(False)
 
     def _sync_current_detail_to_task(self) -> None:
         """从右侧表单实时同步属性回当前 TaskConfig。"""
@@ -2064,10 +2625,23 @@ class MainWindow(QMainWindow):
         task.concurrent_policy = str(self.detail_concurrent_policy_combo.currentData() or "wait_all")
         task.process_keywords = normalize_keywords(self.detail_process_keywords_edit.text())
         task.window_keywords = normalize_keywords(self.detail_window_keywords_edit.text())
+        task.monitor_absent_grace_seconds = self.detail_monitor_grace_spin.value()
 
-        # 更新左侧对应项的文字与状态
+        # 更新左侧对应项的文字、图标与状态
         if self.current_task_idx < len(self._master_task_widgets):
-            self._master_task_widgets[self.current_task_idx].update_info(self.current_task_idx, task.name, task.enabled)
+            icon_path = _task_game_icon_path(
+                self.base_dir,
+                task.name,
+                task.script_path,
+                task.window_keywords,
+            )
+            self._master_task_widgets[self.current_task_idx].update_info(
+                self.current_task_idx,
+                task.name,
+                task.enabled,
+                subtitle=self._task_subtitle_text(self.current_task_idx, task),
+                icon_path=icon_path,
+            )
 
     def _clear_detail_form(self) -> None:
         """清空右侧表单。"""
@@ -2086,6 +2660,7 @@ class MainWindow(QMainWindow):
         self.detail_concurrent_policy_combo.setCurrentIndex(0)
         self.detail_process_keywords_edit.clear()
         self.detail_window_keywords_edit.clear()
+        self.detail_monitor_grace_spin.setValue(15)
 
     def _on_detail_browse_file(self) -> None:
         """右侧表单选择脚本路径。"""
@@ -2454,6 +3029,8 @@ class MainWindow(QMainWindow):
         self._setup_shortcuts()
         self.export_config_button.clicked.connect(self.export_config)
         self.import_config_button.clicked.connect(self.import_config)
+        self.export_ui_params_button.clicked.connect(self.export_ui_params)
+        self.import_ui_params_button.clicked.connect(self.import_ui_params)
         self.refresh_stats_button.clicked.connect(self.refresh_runtime_stats_view)
         self.open_stats_button.clicked.connect(lambda: self.open_directory(self.base_dir / "runtime_stats"))
         self.clear_log_button.clicked.connect(self.clear_log)
@@ -2481,17 +3058,28 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+Q"), self, activated=self.close)
         self.append_log("快捷键：F5启动，F6继续，F7暂停，F8停止执行，Ctrl+Alt+F8紧急停止全部，Ctrl+Q关闭程序。")
 
+    def _update_stats_kpi(self, total_runs: int, script_count: int, last_time: str) -> None:
+        """同步更新运行统计页顶部 KPI 概览卡片。"""
+        if hasattr(self, "stats_total_runs_label"):
+            self.stats_total_runs_label.setText(f"{total_runs} 次")
+        if hasattr(self, "stats_script_count_label"):
+            self.stats_script_count_label.setText(f"{script_count} 个")
+        if hasattr(self, "stats_last_run_label"):
+            self.stats_last_run_label.setText(last_time or "—")
+
     def refresh_runtime_stats_view(self) -> None:
         """在 UI 中用表格展示历史耗时统计，避免长脚本名导致列对齐错乱。"""
         try:
             summary_path = self.base_dir / "runtime_stats" / "runtime_summary.json"
             if not summary_path.exists():
                 self.stats_table.setRowCount(0)
+                self._update_stats_kpi(0, 0, "—")
                 return
             with summary_path.open("r", encoding="utf-8") as f:
                 data = json.load(f)
             if not isinstance(data, dict) or not data:
                 self.stats_table.setRowCount(0)
+                self._update_stats_kpi(0, 0, "—")
                 return
 
             rows = []
@@ -2507,6 +3095,10 @@ class MainWindow(QMainWindow):
                 ))
             rows.sort(key=lambda x: x[0].lower())
 
+            total_runs = sum(r[1] for r in rows)
+            latest_time = max((r[4] for r in rows if r[4]), default="—")
+            self._update_stats_kpi(total_runs, len(rows), latest_time)
+
             self.stats_table.setRowCount(len(rows))
             for row, (name, count, avg, last, last_time) in enumerate(rows):
                 values = [name, str(count), format_seconds(avg), format_seconds(last), last_time]
@@ -2519,6 +3111,7 @@ class MainWindow(QMainWindow):
                     self.stats_table.setItem(row, col, item)
             self.stats_table.resizeRowsToContents()
         except Exception as exc:
+            self._update_stats_kpi(0, 0, "—")
             self.stats_table.setRowCount(1)
             self.stats_table.setItem(0, 0, QTableWidgetItem(f"读取统计失败：{exc}"))
 
@@ -2833,6 +3426,7 @@ class MainWindow(QMainWindow):
         self.auto_start_tasks_checkbox.setChecked(self.config.auto_start_tasks)
         self.windows_startup_checkbox.setChecked(self.config.windows_startup)
         self.timeout_screenshot_checkbox.setChecked(self.config.enable_timeout_screenshot)
+        self.check_updates_checkbox.setChecked(bool(self.config.extra_settings.get("auto_update_scripts_before_launch", True)))
 
     def collect_tasks_from_table(self, sort_by_order: bool = True) -> List[TaskConfig]:
         """收集当前 UI 中的任务配置（无缝兼容调度器接口）。"""
@@ -2905,6 +3499,7 @@ class MainWindow(QMainWindow):
             task.order = index
 
     def save_config_from_ui(self) -> None:
+        self.config.extra_settings["auto_update_scripts_before_launch"] = self.check_updates_checkbox.isChecked()
         tasks = self.collect_tasks_from_table(sort_by_order=True)
         self.config.tasks = tasks
         self.config.shutdown_after_done = self.shutdown_checkbox.isChecked()
@@ -2922,6 +3517,15 @@ class MainWindow(QMainWindow):
             self._show_themed_message("保存失败", f"保存配置失败：{exc}", QMessageBox.Icon.Critical)
             self.append_log(f"保存配置失败：{exc}")
 
+    def show_updates(self) -> None:
+        if self.is_running:
+            return
+        self.save_config_from_ui()
+        dialog = UpdateDialog(self.config.tasks, self)
+        dialog.log_message.connect(self.append_log)
+        dialog.exec()
+        self.config_manager.save(self.config)
+
     def start_tasks(self) -> None:
         if self.is_running:
             return
@@ -2934,6 +3538,15 @@ class MainWindow(QMainWindow):
             self.append_log("【提示】当前没有启用的任务，请在【任务调度】页面开启至少一个任务开关。")
             self._show_themed_message("提示", "当前没有启用的任务。\n请在【任务调度】页面开启至少一个任务。")
             return
+
+        if self.check_updates_checkbox.isChecked():
+            dialog = UpdateDialog(enabled_tasks, self, prepare=True)
+            dialog.log_message.connect(self.append_log)
+            result = dialog.exec()
+            self.config_manager.save(self.config)
+            if result != QDialog.DialogCode.Accepted:
+                self.append_log("已取消本次任务执行。")
+                return
 
         # 检查未填路径的任务并给出友好提示
         for task in enabled_tasks:
@@ -2954,21 +3567,11 @@ class MainWindow(QMainWindow):
         self.is_running = True
         self.run_task_error_count = 0
         self.set_controls_running(True)
-        self.status_value_label.setText("● 正在执行")
-        self.status_value_label.setStyleSheet("""
-            QLabel#StatusBadge {
-                color: #047857;
-                background: rgba(209, 250, 229, 235);
-                border: 1px solid rgba(52, 211, 153, 220);
-                border-radius: 8px;
-                padding: 4px 12px;
-                font-weight: 800;
-                font-size: 13px;
-            }
-        """)
+        self._update_status_view("正在执行")
+        self._set_elapsed_running_style(True)
         self.task_value_label.setText(f"准备执行第 1/{len(enabled_tasks)} 个任务")
         self.elapsed_value_label.setText("00:00")
-        self.progress_value_label.setText(f"0 / {len(enabled_tasks)} 任务")
+        self._set_dashboard_progress(0, len(enabled_tasks))
 
         self.append_log(f"========== 调度流程启动，共 {len(enabled_tasks)} 个已启用任务 ==========")
 
@@ -3007,85 +3610,30 @@ class MainWindow(QMainWindow):
             status_clean = "空闲待命"
 
         if any(kw in status_clean for kw in ["异常", "错误", "失败", "报错"]):
-            display_text = f"● {status_clean}"
-            style = """
-                QLabel#StatusBadge {
-                    color: #B91C1C;
-                    background: rgba(254, 226, 226, 235);
-                    border: 1px solid rgba(248, 113, 113, 220);
-                    border-radius: 8px;
-                    padding: 4px 12px;
-                    font-weight: 800;
-                    font-size: 13px;
-                }
-            """
-        elif "运行" in status_clean or "启动" in status_clean:
-            display_text = f"● {status_clean}"
-            style = """
-                QLabel#StatusBadge {
-                    color: #047857;
-                    background: rgba(209, 250, 229, 235);
-                    border: 1px solid rgba(52, 211, 153, 220);
-                    border-radius: 8px;
-                    padding: 4px 12px;
-                    font-weight: 800;
-                    font-size: 13px;
-                }
-            """
+            fg, bg, border = "#FCA5A5", "rgba(239, 68, 68, 34)", "rgba(248, 113, 113, 130)"
+        elif any(kw in status_clean for kw in ["运行", "启动", "执行"]):
+            fg, bg, border = "#6EE7B7", "rgba(16, 185, 129, 34)", "rgba(52, 211, 153, 130)"
         elif "暂停" in status_clean:
-            display_text = f"● {status_clean}"
-            style = """
-                QLabel#StatusBadge {
-                    color: #B45309;
-                    background: rgba(254, 243, 199, 235);
-                    border: 1px solid rgba(251, 191, 36, 220);
-                    border-radius: 8px;
-                    padding: 4px 12px;
-                    font-weight: 800;
-                    font-size: 13px;
-                }
-            """
+            fg, bg, border = "#FCD34D", "rgba(245, 158, 11, 34)", "rgba(251, 191, 36, 130)"
         elif "完成" in status_clean:
-            display_text = f"● {status_clean}"
-            style = """
-                QLabel#StatusBadge {
-                    color: #047857;
-                    background: rgba(209, 250, 229, 235);
-                    border: 1px solid rgba(52, 211, 153, 220);
-                    border-radius: 8px;
-                    padding: 4px 12px;
-                    font-weight: 800;
-                    font-size: 13px;
-                }
-            """
+            fg, bg, border = "#6EE7B7", "rgba(16, 185, 129, 30)", "rgba(52, 211, 153, 115)"
         elif "停止" in status_clean:
-            display_text = f"● {status_clean}"
-            style = """
-                QLabel#StatusBadge {
-                    color: #4B5563;
-                    background: rgba(243, 244, 246, 235);
-                    border: 1px solid rgba(209, 213, 219, 220);
-                    border-radius: 8px;
-                    padding: 4px 12px;
-                    font-weight: 800;
-                    font-size: 13px;
-                }
-            """
+            fg, bg, border = "#CBD5E1", "rgba(148, 163, 184, 28)", "rgba(148, 163, 184, 100)"
         else:
-            display_text = f"● {status_clean}"
-            style = """
-                QLabel#StatusBadge {
-                    color: #2563EB;
-                    background: rgba(219, 234, 254, 230);
-                    border: 1px solid rgba(147, 197, 253, 220);
-                    border-radius: 8px;
-                    padding: 4px 12px;
-                    font-weight: 800;
-                    font-size: 13px;
-                }
-            """
-        self.status_value_label.setText(display_text)
-        self.status_value_label.setStyleSheet(style)
+            fg, bg, border = "#7DD3FC", "rgba(56, 189, 248, 28)", "rgba(56, 189, 248, 115)"
+
+        self.status_value_label.setText(f"● {status_clean}")
+        self.status_value_label.setStyleSheet(f"""
+            QLabel#StatusBadge {{
+                color: {fg};
+                background: {bg};
+                border: 1px solid {border};
+                border-radius: 9px;
+                padding: 5px 12px;
+                font-weight: 700;
+                font-size: 13px;
+            }}
+        """)
 
     def pause_tasks(self) -> None:
         if not self.is_running or self.runner_worker is None:
@@ -3174,6 +3722,7 @@ class MainWindow(QMainWindow):
             return
         self._update_status_view("运行中")
         self.set_status_character_state("work", force=True)
+        self.collapse_cards(animated=True)
         self.show_temporary_status_character_message("启动成功啦～接下来我会帮你盯着进度。", 10, priority=80)
 
     @Slot(str)
@@ -3196,15 +3745,15 @@ class MainWindow(QMainWindow):
     @Slot(int, int)
     def on_worker_progress(self, current: int, total: int) -> None:
         self.current_progress = (current, total)
-        self.progress_value_label.setText(f"{current} / {total} 任务")
+        self._set_dashboard_progress(current, total)
 
     @Slot(str, int, int)
     def on_worker_task_started(self, task_name: str, index: int, total: int) -> None:
         self.current_task_name = task_name
         self.current_elapsed = 0
-        self.task_value_label.setText(task_name)
+        self.task_value_label.setText(f"当前运行：{task_name}")
         self.elapsed_value_label.setText("00:00")
-        self.progress_value_label.setText(f"{index} / {total} 任务")
+        self._set_dashboard_progress(index, total)
 
     @Slot(int)
     def on_worker_elapsed(self, elapsed: int) -> None:
@@ -3215,6 +3764,7 @@ class MainWindow(QMainWindow):
     def on_worker_finished(self, stopped_or_error: bool) -> None:
         self.is_running = False
         self.set_controls_running(False)
+        self._set_elapsed_running_style(False)
         self.resume_button.setEnabled(False)
         self.pause_button.setEnabled(False)
         self.stop_button.setEnabled(False)
@@ -3257,7 +3807,9 @@ class MainWindow(QMainWindow):
             "table", "shutdown_checkbox", "shutdown_delay_spin",
             "auto_exit_checkbox", "auto_start_tasks_checkbox",
             "windows_startup_checkbox", "timeout_screenshot_checkbox",
+            "check_updates_checkbox", "updates_button",
             "export_config_button", "import_config_button",
+            "export_ui_params_button", "import_ui_params_button",
         ]
         for name in controls_disabled_when_running:
             w = getattr(self, name, None)
@@ -3318,8 +3870,7 @@ class MainWindow(QMainWindow):
         return self.base_dir / "assets" / Path(*parts)
 
     def _existing_asset_path(self, *parts) -> Path | None:
-        path = self._asset_path(*parts)
-        return path if path.exists() else None
+        return _find_asset_file(self.base_dir, *parts)
 
     def apply_theme(self, theme: str) -> None:
         palettes = {
@@ -3371,6 +3922,15 @@ class MainWindow(QMainWindow):
             if idx >= 0:
                 self.theme_combo.setCurrentIndex(idx)
             self._applying_theme = False
+
+        # 同步卡片自绘用色和外部卡片美术资源。
+        if hasattr(self, "cards"):
+            large_card = self._existing_asset_path("cards", "large", "card_main.png")
+            small_card = self._existing_asset_path("cards", "small", "card_sub.png")
+            for card in self.cards.values():
+                card.set_visual_palette(pal["accent"], pal["panel"], pal["border"])
+                if hasattr(card, "set_card_assets"):
+                    card.set_card_assets(str(large_card) if large_card else None, str(small_card) if small_card else None)
 
         bg_path = self._existing_asset_path("bg", self._theme_asset_folder(theme), "bg_01.png")
         if hasattr(self, "root_widget") and hasattr(self.root_widget, "set_background_image"):
@@ -3425,16 +3985,70 @@ class MainWindow(QMainWindow):
                 border-color: rgba(60, 70, 90, 80);
             }}
             QComboBox, QSpinBox, QLineEdit {{
-                background-color: rgba(24, 28, 38, 240);
+                background-color: rgba(18, 24, 38, 238);
                 color: #F1F5F9;
-                border: 1px solid rgba(65, 78, 102, 180);
-                border-radius: 6px;
+                border: 1px solid rgba(96, 130, 190, 95);
+                border-radius: 7px;
                 padding: 4px 10px;
-                min-height: 26px;
+                min-height: 28px;
+            }}
+            QComboBox:hover, QSpinBox:hover, QLineEdit:hover {{
+                border-color: rgba(96, 165, 250, 165);
             }}
             QComboBox:focus, QSpinBox:focus, QLineEdit:focus {{
                 border: 1.5px solid #3B82F6;
-                background-color: rgba(30, 36, 48, 255);
+                background-color: rgba(24, 32, 50, 255);
+            }}
+            QComboBox:disabled, QSpinBox:disabled, QLineEdit:disabled {{
+                background-color: rgba(15, 20, 32, 165);
+                color: #64748B;
+                border-color: rgba(71, 85, 105, 65);
+            }}
+            QComboBox::drop-down {{
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 24px;
+                border-left: 1px solid rgba(96, 130, 190, 45);
+                background: transparent;
+            }}
+            QComboBox::down-arrow {{
+                width: 0px;
+                height: 0px;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 5px solid #93C5FD;
+            }}
+            QComboBox QAbstractItemView {{
+                background-color: #141B2D;
+                color: #F1F5F9;
+                border: 1px solid rgba(96, 130, 190, 130);
+                border-radius: 8px;
+                padding: 4px;
+                selection-background-color: rgba(59, 130, 246, 85);
+                selection-color: #FFFFFF;
+                outline: none;
+            }}
+            QSpinBox::up-button, QSpinBox::down-button {{
+                width: 18px;
+                background-color: rgba(30, 41, 64, 175);
+                border-left: 1px solid rgba(96, 130, 190, 45);
+            }}
+            QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
+                background-color: rgba(59, 130, 246, 95);
+            }}
+            QSpinBox::up-arrow {{
+                width: 0px;
+                height: 0px;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-bottom: 4px solid #93C5FD;
+            }}
+            QSpinBox::down-arrow {{
+                width: 0px;
+                height: 0px;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 4px solid #93C5FD;
             }}
             QCheckBox {{
                 background: transparent;
@@ -3490,69 +4104,113 @@ class MainWindow(QMainWindow):
                 font-size: 12.5px;
             }}
             QTextEdit {{
-                background-color: rgba(20, 28, 44, 238);
-                color: #79E89E;
+                background-color: rgba(10, 14, 24, 240);
+                color: #A7F3D0;
                 font-family: "Cascadia Code", "Fira Code", Consolas, monospace;
                 font-size: 12.5px;
-                border: 1px solid rgba(80, 120, 190, 140);
-                border-radius: 12px;
-                padding: 8px;
+                border: 1px solid rgba(96, 130, 190, 90);
+                border-radius: 10px;
+                padding: 10px;
                 selection-background-color: #3B82F6;
-            }}
-            QHeaderView::section {{
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(238, 245, 255, 245), stop:1 rgba(225, 236, 252, 245));
-                color: #273E61;
-                border: 1px solid rgba(183, 199, 230, 130);
-                padding: 6px;
-                font-weight: 700;
             }}
             QScrollBar:vertical {{
                 border: none;
-                background: rgba(240, 245, 255, 100);
+                background: rgba(15, 23, 42, 90);
                 width: 8px;
                 border-radius: 4px;
                 margin: 2px;
             }}
             QScrollBar::handle:vertical {{
-                background: rgba(140, 175, 230, 180);
+                background: rgba(100, 135, 195, 130);
                 border-radius: 4px;
                 min-height: 24px;
             }}
             QScrollBar::handle:vertical:hover {{
-                background: rgba(100, 145, 220, 240);
+                background: rgba(96, 165, 250, 210);
             }}
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
                 height: 0px;
             }}
             QScrollBar:horizontal {{
                 border: none;
-                background: rgba(240, 245, 255, 100);
+                background: rgba(15, 23, 42, 90);
                 height: 8px;
                 border-radius: 4px;
                 margin: 2px;
             }}
             QScrollBar::handle:horizontal {{
-                background: rgba(140, 175, 230, 180);
+                background: rgba(100, 135, 195, 130);
                 border-radius: 4px;
                 min-width: 24px;
             }}
             QScrollBar::handle:horizontal:hover {{
-                background: rgba(100, 145, 220, 240);
+                background: rgba(96, 165, 250, 210);
             }}
             QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
                 width: 0px;
             }}
             QMenuBar, QMenu {{
-                background-color: rgba(255, 255, 255, 245);
+                background-color: rgba(20, 26, 40, 248);
                 color: {pal['fg']};
-                border: 1px solid rgba(183, 199, 230, 160);
-                border-radius: 8px;
-                padding: 4px;
+                border: 1px solid rgba(96, 130, 190, 115);
+                border-radius: 9px;
+                padding: 5px;
+            }}
+            QMenu::item {{
+                padding: 6px 14px;
+                border-radius: 6px;
             }}
             QMenu::item:selected {{
-                background-color: {pal['select']};
-                color: #1A3865;
+                background-color: rgba(59, 130, 246, 85);
+                color: #FFFFFF;
                 border-radius: 6px;
+            }}
+            QWidget#CardSceneWidget {{
+                background: transparent;
+            }}
+            QFrame#CardPanel {{
+                background: transparent;
+                border: none;
+            }}
+            QWidget#CardOverlay {{
+                background: transparent;
+            }}
+            QWidget#CardContent {{
+                background: transparent;
+            }}
+            QLabel#CardTitle {{
+                font-size: 21px;
+                font-weight: 800;
+                color: {pal['fg']};
+                background: transparent;
+                padding: 0px;
+                margin: 0px;
+            }}
+            QLabel#CardSubtitle, QLabel#CardPreview {{
+                color: {pal['muted']};
+                background: transparent;
+                line-height: 150%;
+            }}
+            QLabel#CardBadge {{
+                color: #FFFFFF;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #4F7DF9, stop:1 #8862F2);
+                border: 1px solid rgba(255,255,255,140);
+                border-radius: 10px;
+                padding: 5px 12px;
+                font-weight: bold;
+                min-width: 52px;
+            }}
+            QPushButton#CardExitButton {{
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #FFFFFF, stop:1 #EAF1FB);
+                color: {pal['fg']};
+                border: 1px solid {pal['border']};
+                border-radius: 9px;
+                padding: 0px;
+                font-weight: bold;
+            }}
+            QPushButton#CardExitButton:hover {{
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #EAF1FB, stop:1 #D9E7FF);
+                border-color: {pal['accent']};
             }}
             QPushButton#TaskAdvancedToggleButton {{
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(255,255,255,230), stop:1 rgba(235,244,255,230));
@@ -3641,54 +4299,8 @@ class MainWindow(QMainWindow):
             }}
         """)
 
-        # 确保启动中心核心控制按钮保持 Fluent 纯蓝与单色深色科技质感
-        if hasattr(self, "start_button"):
-            self.start_button.setStyleSheet("""
-                QPushButton {
-                    background-color: #2563EB;
-                    color: #FFFFFF;
-                    font-size: 13.5px;
-                    font-weight: 700;
-                    border: 1px solid #3B82F6;
-                    border-radius: 8px;
-                    padding: 0 18px;
-                }
-                QPushButton:hover {
-                    background-color: #1D4ED8;
-                    border-color: #60A5FA;
-                }
-                QPushButton:disabled {
-                    background-color: rgba(37, 99, 235, 100);
-                    color: rgba(255, 255, 255, 140);
-                    border-color: rgba(59, 130, 246, 80);
-                }
-            """)
-
-        ctrl_btn_style = """
-            QPushButton {
-                background-color: rgba(38, 48, 64, 200);
-                color: #F1F5F9;
-                border: 1px solid rgba(80, 100, 130, 140);
-                border-radius: 8px;
-                padding: 0 12px;
-                font-size: 12.5px;
-                font-weight: 600;
-            }
-            QPushButton:hover {
-                background-color: rgba(56, 70, 96, 240);
-                border-color: rgba(100, 130, 175, 180);
-                color: #FFFFFF;
-            }
-            QPushButton:disabled {
-                background-color: rgba(30, 36, 48, 120);
-                color: #64748B;
-                border-color: rgba(60, 72, 90, 80);
-            }
-        """
-
-        for btn_name in ["resume_button", "pause_button", "stop_button", "emergency_stop_button", "cancel_shutdown_button"]:
-            if hasattr(self, btn_name):
-                getattr(self, btn_name).setStyleSheet(ctrl_btn_style)
+        # 确保启动中心核心控制按钮保持 Fluent 渐变与分组深色玻璃质感
+        self._apply_dashboard_button_styles()
 
 
     def _current_startup_command(self) -> str:
@@ -3776,6 +4388,7 @@ class MainWindow(QMainWindow):
                 auto_start_tasks=local_config.auto_start_tasks,
                 windows_startup=local_config.windows_startup,
                 enable_timeout_screenshot=local_config.enable_timeout_screenshot,
+                extra_settings=local_config.extra_settings.copy(),
                 tasks=imported.tasks,
             )
 
@@ -3794,6 +4407,67 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._show_themed_message("导入失败", f"导入配置失败：{exc}", QMessageBox.Icon.Critical)
             self.append_log(f"导入配置失败：{exc}")
+
+    def _collect_ui_params(self) -> dict:
+        """收集卡片布局调参参数。"""
+        if not hasattr(self, "card_area"):
+            return {}
+        return {key: pose.__dict__.copy() for key, pose in self.card_area.overview_layout.items()}
+
+    def export_ui_params(self) -> None:
+        """导出卡片 UI 布局参数，供开发版调参复用。"""
+        try:
+            default_path = str(self.base_dir / "card_layout_debug.json")
+            path, _ = QFileDialog.getSaveFileName(
+                self,
+                "导出UI参数",
+                default_path,
+                "JSON 参数文件 (*.json);;所有文件 (*.*)",
+            )
+            if not path:
+                return
+            with Path(path).open("w", encoding="utf-8") as f:
+                json.dump(self._collect_ui_params(), f, ensure_ascii=False, indent=2)
+            self.append_log(f"UI参数已导出：{path}")
+            self._show_themed_message("导出成功", f"UI参数已导出：\n{path}")
+        except Exception as exc:
+            self._show_themed_message("导出失败", f"导出UI参数失败：{exc}", QMessageBox.Icon.Critical)
+            self.append_log(f"导出UI参数失败：{exc}")
+
+    def import_ui_params(self) -> None:
+        """导入卡片 UI 布局参数，并保存为 config/card_layout_debug.json。"""
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "导入UI参数",
+            str(self.base_dir),
+            "JSON 参数文件 (*.json);;所有文件 (*.*)",
+        )
+        if not path:
+            return
+        try:
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("UI参数文件顶层结构不是对象")
+            if not hasattr(self, "card_area"):
+                raise RuntimeError("当前界面没有可调参的卡片区域")
+            for key, item in data.items():
+                if key in self.card_area.overview_layout and isinstance(item, dict):
+                    self.card_area.overview_layout[key] = _pose_from_dict(item, self.card_area.overview_layout[key])
+            self.card_area.apply_layout()
+
+            debug_path = self.base_dir / "config" / "card_layout_debug.json"
+            debug_path.parent.mkdir(parents=True, exist_ok=True)
+            with debug_path.open("w", encoding="utf-8") as f:
+                json.dump(self._collect_ui_params(), f, ensure_ascii=False, indent=2)
+
+            if getattr(self.card_area, "_tuner_dialog", None) is not None:
+                self.card_area._tuner_dialog._sync_controls()
+
+            self.append_log(f"UI参数已导入并保存：{path}")
+            self._show_themed_message("导入成功", "UI参数已导入，并保存为默认调参文件。")
+        except Exception as exc:
+            self._show_themed_message("导入失败", f"导入UI参数失败：{exc}", QMessageBox.Icon.Critical)
+            self.append_log(f"导入UI参数失败：{exc}")
 
     def open_external_url(self, url: str) -> None:
         try:

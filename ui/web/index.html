@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>简小松·脚本调度助手 v0.1.1</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body data-theme="jiansz">
+  <!-- 背景层：深邃暗夜基底 + 柔和环境光晕（不再透出干扰文字的碎斑点） -->
+  <div class="app-backdrop" aria-hidden="true">
+    <div class="backdrop-wallpaper" id="backdropWallpaper"></div>
+    <div class="backdrop-vignette"></div>
+    <div class="ambient-orb orb-a"></div>
+    <div class="ambient-orb orb-b"></div>
+  </div>
+
+  <div class="app-shell">
+    <!-- 顶部无边框拖拽标题栏 -->
+    <header class="titlebar pywebview-drag-region">
+      <div class="titlebar-brand">
+        <img class="brand-icon" src="/assets/icon.ico" alt="" onerror="this.style.display='none'" />
+        <span class="brand-title">简小松·脚本调度助手</span>
+        <span class="brand-version">v0.1.1</span>
+      </div>
+      <div class="titlebar-right">
+        <div class="hotkey-chip" title="全局与窗口快捷键">
+          <span>F5 启动</span>
+          <span class="sep">·</span>
+          <span>F7 暂停</span>
+          <span class="sep">·</span>
+          <span>F8 停止</span>
+        </div>
+        <div class="win-controls">
+          <button class="win-btn" id="btnWinMin" title="最小化" aria-label="最小化">
+            <svg viewBox="0 0 16 16" fill="none"><path d="M3.5 8.5h9" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+          </button>
+          <button class="win-btn" id="btnWinMax" title="最大化 / 还原" aria-label="最大化">
+            <svg viewBox="0 0 16 16" fill="none"><rect x="3.5" y="3.5" width="9" height="9" rx="1.6" stroke="currentColor" stroke-width="1.35"/></svg>
+          </button>
+          <button class="win-btn win-btn-close" id="btnWinClose" title="关闭 (Ctrl+Q)" aria-label="关闭">
+            <svg viewBox="0 0 16 16" fill="none"><path d="M4.2 4.2l7.6 7.6M11.8 4.2l-7.6 7.6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <div class="workspace">
+      <!-- 左侧导航栏 -->
+      <aside class="sidebar">
+        <div class="nav-group-label">工作台</div>
+        <nav class="nav-list" id="navList">
+          <button class="nav-item active" data-page="dashboard">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="2"/><rect x="14" y="3" width="7" height="5" rx="2"/><rect x="14" y="12" width="7" height="9" rx="2"/><rect x="3" y="16" width="7" height="5" rx="2"/></svg>
+            <span>启动中心</span>
+          </button>
+          <button class="nav-item" data-page="tasks">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/></svg>
+            <span>任务调度</span>
+            <span class="nav-badge" id="navTaskBadge">0</span>
+          </button>
+          <button class="nav-item" data-page="stats">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16M7 16v-5M12 16V7M17 16v-8"/></svg>
+            <span>运行统计</span>
+          </button>
+          <button class="nav-item" data-page="logs">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+            <span>运行日志</span>
+          </button>
+        </nav>
+
+        <div class="sidebar-spacer"></div>
+
+        <!-- 左下角实时运行微状态指示 -->
+        <div class="sidebar-status-pill" id="sidebarStatusPill">
+          <span class="pulse-dot" id="sidebarDot"></span>
+          <div class="sidebar-status-text">
+            <div class="s-label">调度器状态</div>
+            <div class="s-value" id="sidebarStatusText">空闲待命</div>
+          </div>
+        </div>
+
+        <button class="nav-item nav-settings" data-page="settings">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.6.77 1 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <span>全局设置</span>
+        </button>
+
+        <div class="sidebar-footer">
+          <button class="link-btn" data-external="author">联系作者</button>
+          <button class="link-btn" data-external="github">GitHub</button>
+          <button class="link-btn" data-external="docs">使用文档</button>
+        </div>
+      </aside>
+
+      <!-- 右侧内容视口 -->
+      <main class="content-area">
+        <!-- ==================== PAGE 0: 启动中心 ==================== -->
+        <section class="page active" id="page-dashboard">
+          <div class="hero-banner">
+            <img class="hero-img" src="/assets/banner/banner.jpg" alt="" />
+            <div class="hero-scrim"></div>
+            <div class="hero-content">
+              <div class="hero-left">
+                <div class="hero-badge">Jiansz · 一条龙自动调度中枢</div>
+                <h1 class="hero-title">简小松·脚本调度助手</h1>
+                <p class="hero-subtitle">多脚本顺序托管 · 外部进程守护 · 脚本日志报告</p>
+              </div>
+              <div class="hero-telemetry">
+                <div class="telemetry-chip">
+                  <span class="t-label">待执行队列</span>
+                  <span class="t-value" id="heroEnabledCount">0 / 0</span>
+                </div>
+                <button class="btn-ghost-glass" id="btnHeroReports" title="查看全部脚本历史运行报告">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+                  <span>运行报告</span>
+                </button>
+                <button class="btn-ghost-glass" id="btnHeroUpdates" title="检查与更新脚本">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg>
+                  <span>脚本更新</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- 主控台：核心启动操作置中优先 -->
+          <div class="control-dock glass-panel" id="controlDock">
+            <div class="dock-idle" id="dockIdle">
+              <div class="dock-main-row">
+                <button class="btn-primary-glow btn-hero-launch" id="btnStartTasks">
+                  <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.14v14l11-7-11-7z"/></svg>
+                  <span>开始执行一条龙</span>
+                  <kbd class="btn-kbd">F5</kbd>
+                </button>
+
+                <div class="dock-summary-group" id="dockSummaryPills"></div>
+
+                <div class="dock-quick-pills">
+                  <span class="policy-pill" title="已开启安全策略：启动一条龙前自动校验并更新脚本">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg>
+                    <span>启动前必更</span>
+                  </span>
+                  <label class="chip-toggle" title="全部任务完成后自动安全关机">
+                    <input type="checkbox" id="quickShutdownAfter" />
+                    <span>完成后关机</span>
+                  </label>
+                  <button class="btn-subtle" id="btnCancelShutdownIdle" style="display:none">取消关机</button>
+                </div>
+              </div>
+
+              <div class="dock-pipeline-row">
+                <span class="pipe-row-label">执行顺序</span>
+                <div class="pipeline-strip" id="pipelineStrip" title="点击跳转到任务调度"></div>
+              </div>
+            </div>
+
+            <div class="dock-running" id="dockRunning" style="display:none">
+              <div class="running-top">
+                <div class="running-info">
+                  <span class="status-pill running" id="runStatusBadge">正在执行</span>
+                  <span class="running-task-title" id="runTaskLabel">准备就绪</span>
+                </div>
+                <div class="running-metrics">
+                  <span class="progress-fraction" id="runProgressText">0 / 0 (0%)</span>
+                  <span class="timer-pill" id="runElapsedText">00:00</span>
+                </div>
+              </div>
+
+              <div class="running-bar-track">
+                <div class="running-bar-fill" id="runProgressBar" style="width: 0%"></div>
+              </div>
+
+              <div class="running-actions">
+                <button class="btn-secondary" id="btnPauseTasks">暂停 (F7)</button>
+                <button class="btn-secondary" id="btnResumeTasks" style="display:none">继续 (F6)</button>
+                <button class="btn-secondary" id="btnStopTasks">停止 (F8)</button>
+                <button class="btn-danger-soft" id="btnEmergencyStop">紧急停止</button>
+                <div class="spacer"></div>
+                <button class="btn-subtle" id="btnCancelShutdown">取消关机</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- 1~5 张单行全铺满脚本日志简报 -->
+          <div class="reports-section-head">
+            <span class="reports-section-title">脚本日志简报</span>
+            <span class="reports-section-hint">点击任意卡片查看完整日志与依据</span>
+          </div>
+          <div class="games-grid" id="gamesGrid"></div>
+        </section>
+
+        <!-- ==================== PAGE 1: 任务调度 ==================== -->
+        <section class="page" id="page-tasks">
+          <div class="tasks-workspace">
+            <div class="tasks-queue-panel glass-panel">
+              <div class="panel-head">
+                <div class="panel-head-title">
+                  <h2>任务队列</h2>
+                  <span class="count-pill" id="tasksQueueCount">0 / 0</span>
+                </div>
+                <div class="panel-head-actions">
+                  <button class="btn-subtle btn-sm" id="btnAddTask">+ 添加</button>
+                  <button class="btn-primary-sm" id="btnTasksStart">▶ 启动</button>
+                </div>
+              </div>
+              <div class="queue-tip">按住拖动调整顺序 · 开关决定是否参与一条龙</div>
+              <div class="queue-list" id="taskQueueList"></div>
+            </div>
+
+            <div class="tasks-detail-panel">
+              <div class="glass-panel preset-bar">
+                <div class="preset-bar-left">
+                  <span class="preset-label">配置管理</span>
+                  <span class="preset-badge">当前预设：默认配置</span>
+                </div>
+                <div class="preset-bar-actions">
+                  <button class="btn-subtle btn-sm" id="btnImportConfig">导入配置</button>
+                  <button class="btn-subtle btn-sm" id="btnExportConfig">导出配置</button>
+                  <button class="btn-primary-sm" id="btnSaveConfig">保存配置</button>
+                </div>
+              </div>
+
+              <div class="detail-scroll" id="taskDetailForm">
+                <div class="empty-detail" id="taskDetailEmpty" style="display:none">
+                  暂无选中的任务，请点击左侧「+ 添加」新建任务。
+                </div>
+
+                <div id="taskDetailContent">
+                  <div class="glass-panel form-section">
+                    <div class="section-head">
+                      <h3>基础运行参数</h3>
+                      <p>设置脚本名称、可执行路径、启动参数及超时上限</p>
+                    </div>
+                    <div class="form-grid">
+                      <div class="field col-2">
+                        <label>任务名称</label>
+                        <input type="text" id="fieldTaskName" placeholder="例如：March7th Assistant.exe / 鸣潮" />
+                      </div>
+                      <div class="field col-2">
+                        <label>脚本 / 程序路径</label>
+                        <div class="input-with-btn">
+                          <input type="text" id="fieldScriptPath" placeholder="可执行文件 / Python 脚本 / 启动器路径" />
+                          <button class="btn-subtle" id="btnBrowseScript">浏览…</button>
+                        </div>
+                      </div>
+                      <div class="field col-2">
+                        <div class="label-row">
+                          <label>命令行启动参数</label>
+                          <label class="mini-switch">
+                            <input type="checkbox" id="fieldUseArgs" />
+                            <span class="switch-track"></span>
+                            <span class="switch-text">启用参数</span>
+                          </label>
+                        </div>
+                        <input type="text" id="fieldArgs" placeholder="例如：-t 1 -e 或 --auto --task daily" />
+                      </div>
+                      <div class="field">
+                        <label>执行顺序</label>
+                        <input type="number" id="fieldOrder" min="1" max="999" />
+                      </div>
+                      <div class="field">
+                        <label>最大运行时间（分钟）</label>
+                        <input type="number" id="fieldTimeout" min="0" max="9999" />
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="glass-panel form-section">
+                    <div class="section-head">
+                      <h3>超时与完成判断策略</h3>
+                      <p>决定脚本如何结束判定及超时后的应对策略</p>
+                    </div>
+                    <div class="form-grid">
+                      <div class="field">
+                        <label>超时处理方式</label>
+                        <select id="fieldTimeoutAction"></select>
+                      </div>
+                      <div class="field">
+                        <label>自动按 Enter 确认延时（秒）</label>
+                        <input type="number" id="fieldEnterDelay" min="0" max="3600" />
+                      </div>
+                      <div class="field">
+                        <label>完成判断方式</label>
+                        <select id="fieldWaitMode"></select>
+                      </div>
+                      <div class="field">
+                        <label>等待进程名 / 关键词</label>
+                        <input type="text" id="fieldWaitProcess" placeholder="例如：Endfield.exe" />
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="glass-panel form-section">
+                    <div class="section-head row-between">
+                      <div>
+                        <h3>进阶与守护策略</h3>
+                        <p>多任务并发、外部游戏进程守护及窗口消失确认</p>
+                      </div>
+                      <label class="mini-switch">
+                        <input type="checkbox" id="fieldWatchdog" />
+                        <span class="switch-track"></span>
+                        <span class="switch-text" title="在达到运行上限的 5/6 时提醒，并记录异常短的运行时长">启用守护提醒</span>
+                      </label>
+                    </div>
+                    <div class="form-grid">
+                      <div class="field">
+                        <label>并发组名</label>
+                        <input type="text" id="fieldConcurrentGroup" placeholder="相同组名任务并发启动" />
+                      </div>
+                      <div class="field">
+                        <label>组完成策略</label>
+                        <select id="fieldConcurrentPolicy"></select>
+                      </div>
+                      <div class="field col-2">
+                        <label>目标进程关键词（逗号隔开）</label>
+                        <input type="text" id="fieldProcessKeywords" placeholder="例如：Endfield.exe, OK-WW" />
+                      </div>
+                      <div class="field">
+                        <label>游戏窗口关键词（逗号隔开）</label>
+                        <input type="text" id="fieldWindowKeywords" placeholder="例如：鸣潮, 星穹铁道" />
+                      </div>
+                      <div class="field">
+                        <label>消失确认延时（秒）</label>
+                        <input type="number" id="fieldMonitorGrace" min="1" max="3600" />
+                      </div>
+                    </div>
+
+                    <div class="danger-row">
+                      <button class="btn-danger-soft" id="btnDeleteTask">删除此任务</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ==================== PAGE 2: 运行统计 ==================== -->
+        <section class="page" id="page-stats">
+          <div class="kpi-grid">
+            <div class="glass-panel kpi-card">
+              <div class="kpi-accent teal"></div>
+              <span class="kpi-label">累计执行次数</span>
+              <strong class="kpi-value" id="kpiTotalRuns">0 次</strong>
+            </div>
+            <div class="glass-panel kpi-card">
+              <div class="kpi-accent blue"></div>
+              <span class="kpi-label">已统计脚本数</span>
+              <strong class="kpi-value" id="kpiScriptCount">0 个</strong>
+            </div>
+            <div class="glass-panel kpi-card">
+              <div class="kpi-accent violet"></div>
+              <span class="kpi-label">最近记录时间</span>
+              <strong class="kpi-value mono-sm" id="kpiLastTime">—</strong>
+            </div>
+          </div>
+
+          <div class="glass-panel stats-card">
+            <div class="panel-head">
+              <div>
+                <h2>运行耗时明细</h2>
+                <p class="sub-caption">各脚本的运行次数、耗时和最近执行结果</p>
+              </div>
+              <div class="panel-head-actions">
+                <button class="btn-subtle btn-sm" id="btnScriptReportHistory">脚本运行报告</button>
+                <button class="btn-subtle btn-sm" id="btnRefreshStats">刷新统计</button>
+                <button class="btn-subtle btn-sm" id="btnOpenStatsDir">打开统计目录</button>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>脚本名称</th>
+                    <th class="num">执行次数</th>
+                    <th class="num">平均耗时</th>
+                    <th class="num">最近耗时</th>
+                    <th class="num">最近记录时间</th>
+                    <th>最近结果</th>
+                  </tr>
+                </thead>
+                <tbody id="statsTableBody"></tbody>
+              </table>
+              <div class="table-empty" id="statsEmpty" style="display:none">暂无运行统计记录，执行一轮任务后将自动生成。</div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ==================== PAGE 3: 运行日志 ==================== -->
+        <section class="page" id="page-logs">
+          <div class="glass-panel logs-card">
+            <div class="panel-head">
+              <div class="logs-head-left">
+                <span class="live-chip"><span class="live-dot"></span>实时日志流</span>
+                <input type="text" class="log-filter" id="logFilterInput" placeholder="过滤关键字…" />
+              </div>
+              <div class="panel-head-actions">
+                <label class="chip-toggle">
+                  <input type="checkbox" id="logAutoScroll" checked />
+                  <span>自动滚动</span>
+                </label>
+                <button class="btn-subtle btn-sm" id="btnClearLogs">清空</button>
+                <button class="btn-subtle btn-sm" id="btnCopyLogs">复制全部</button>
+                <button class="btn-subtle btn-sm" id="btnOpenLogsDir">打开日志目录</button>
+              </div>
+            </div>
+            <div class="terminal-view" id="logTerminal"></div>
+          </div>
+        </section>
+
+        <!-- ==================== PAGE 4: 全局设置 ==================== -->
+        <section class="page" id="page-settings">
+          <div class="settings-scroll">
+            <div class="glass-panel settings-group">
+              <div class="section-head">
+                <h3>自动化与启动策略</h3>
+                <p>配置系统自启、自动执行流程与脚本更新管理</p>
+              </div>
+              <div class="setting-row">
+                <div>
+                  <div class="setting-title">Windows 开机自启动本程序</div>
+                  <div class="setting-desc">系统登录时自动启动调度助手</div>
+                </div>
+                <label class="switch-lg"><input type="checkbox" id="setWinStartup" /><span></span></label>
+              </div>
+              <div class="setting-row">
+                <div>
+                  <div class="setting-title">程序启动后自动开始执行任务</div>
+                  <div class="setting-desc">打开软件 1.5 秒后自动启动已开启的任务队列</div>
+                </div>
+                <label class="switch-lg"><input type="checkbox" id="setAutoStart" /><span></span></label>
+              </div>
+              <div class="setting-row">
+                <div>
+                  <div class="setting-title">超时处理时自动保存前后屏幕截图</div>
+                  <div class="setting-desc">任务超时强退前自动截屏保存至 logs/screenshots 便于排查</div>
+                </div>
+                <label class="switch-lg"><input type="checkbox" id="setTimeoutShot" /><span></span></label>
+              </div>
+              <div class="setting-row">
+                <div>
+                  <div class="setting-title">启动脚本前强制检查并更新</div>
+                  <div class="setting-desc">每次启动都检查版本；有更新先完成更新，失败时不启动任务</div>
+                </div>
+                <label class="switch-lg"><input type="checkbox" id="setCheckUpdates" checked disabled /><span></span></label>
+              </div>
+              <div class="setting-row">
+                <div>
+                  <div class="setting-title">脚本与工具版本管理</div>
+                  <div class="setting-desc">检查并更新已启用任务对应的脚本程序</div>
+                </div>
+                <button class="btn-subtle" id="btnOpenUpdatesSettings">打开脚本更新器</button>
+              </div>
+            </div>
+
+            <div class="glass-panel settings-group">
+              <div class="section-head">
+                <h3>QQ 邮件通知</h3>
+                <p>整轮结束后发送异常汇总，启动前更新失败时发送未启动通知。</p>
+              </div>
+              <div class="setting-row">
+                <label for="mailEnabled">启用异常邮件</label>
+                <label class="switch-lg"><input type="checkbox" id="mailEnabled" aria-label="启用异常邮件" /><span></span></label>
+              </div>
+              <div class="mail-settings-fields">
+                <label class="field">发件邮箱<input id="mailSender" type="email" autocomplete="off" /></label>
+                <label class="field">收件邮箱<input id="mailRecipient" type="email" autocomplete="off" /></label>
+                <label class="field">SMTP 授权码<input id="mailCode" type="password" autocomplete="new-password" placeholder="留空保留原授权码" /></label>
+              </div>
+              <div class="panel-head-actions">
+                <button type="button" class="btn-subtle" id="btnSaveMail">保存邮件设置</button>
+                <button type="button" class="btn-subtle" id="btnTestMail">保存并发送测试邮件</button>
+              </div>
+            </div>
+
+            <div class="glass-panel settings-group">
+              <div class="section-head">
+                <h3>关机与退出策略</h3>
+                <p>所有队列任务完成后的系统收尾行为</p>
+              </div>
+              <div class="setting-row">
+                <div>
+                  <div class="setting-title">所有任务完成后自动关机</div>
+                  <div class="setting-desc">全部调度任务完成后触发安全关机倒计时</div>
+                </div>
+                <label class="switch-lg"><input type="checkbox" id="setShutdownAfter" /><span></span></label>
+              </div>
+              <div class="setting-row">
+                <div>
+                  <div class="setting-title">关机等待倒计时（秒）</div>
+                  <div class="setting-desc">关机前缓冲时间，期间可随时取消关机</div>
+                </div>
+                <input type="number" class="compact-num" id="setShutdownDelay" min="0" max="86400" step="10" />
+              </div>
+              <div class="setting-row">
+                <div>
+                  <div class="setting-title">所有任务完成后自动退出程序</div>
+                  <div class="setting-desc">全部任务无异常完成后自动关闭窗口</div>
+                </div>
+                <label class="switch-lg"><input type="checkbox" id="setAutoExit" /><span></span></label>
+              </div>
+            </div>
+
+            <div class="glass-panel settings-group">
+              <div class="section-head">
+                <h3>界面主题与氛围</h3>
+                <p>实时切换主题色调与背景壁纸效果</p>
+              </div>
+              <div class="setting-row">
+                <div>
+                  <div class="setting-title">视觉主题风格</div>
+                  <div class="setting-desc">切换后立即生效并保存到 config.json</div>
+                </div>
+                <select class="compact-select" id="setThemeSelect">
+                  <option value="jiansz">星海深邃（默认推荐）</option>
+                  <option value="dark">纯粹暗夜</option>
+                  <option value="campus">晴空蓝调</option>
+                  <option value="fresh">翠影清新</option>
+                  <option value="fantasy">暮色幻想</option>
+                  <option value="light">柔光浅蓝</option>
+                </select>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <!-- ==================== 弹窗层 (Glass Modals) ==================== -->
+  <div class="modal-backdrop" id="scriptReportHistoryModal" style="display:none">
+    <div class="modal-card glass-panel modal-lg">
+      <div class="modal-header">
+        <h3>脚本运行报告</h3>
+        <button type="button" class="modal-close" data-close-modal="scriptReportHistoryModal" aria-label="关闭">✕</button>
+      </div>
+      <div class="modal-body" id="scriptReportHistoryList"></div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="scriptReportModal" style="display:none">
+    <div class="modal-card glass-panel">
+      <div class="modal-header">
+        <h3 id="scriptReportTitle">运行报告</h3>
+        <button type="button" class="modal-close" data-close-modal="scriptReportModal" aria-label="关闭">✕</button>
+      </div>
+      <div class="modal-body">
+        <strong id="scriptReportState"></strong>
+        <p class="report-modal-evidence" id="scriptReportEvidence"></p>
+        <p class="modal-desc" id="scriptReportMeta"></p>
+      </div>
+    </div>
+  </div>
+
+  <!-- 3. 脚本更新器弹窗 -->
+  <div class="modal-backdrop" id="updateModal" style="display:none">
+    <div class="modal-card glass-panel modal-lg">
+      <div class="modal-header">
+        <h3 id="updateModalTitle">脚本与工具更新</h3>
+        <button class="modal-close" id="btnUpdateClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <p class="modal-desc" id="updateModalHint">检查已启用任务对应的脚本版本。</p>
+        <div class="update-progress-panel" id="updateProgressPanel" aria-live="polite">
+          <div class="update-progress-heading"><strong id="updateProgressTitle">等待检查</strong><span id="updateProgressPercent">—</span></div>
+          <div class="update-progress-track" id="updateProgressTrack" role="progressbar" aria-label="当前更新阶段进度"><div id="updateProgressFill"></div></div>
+          <div class="update-progress-detail" id="updateProgressDetail">下载时显示已下载量、总大小和速度。</div>
+        </div>
+        <div class="table-wrap update-table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th style="width:42px"><input type="checkbox" id="updCheckAll" checked /></th>
+                <th>脚本名称</th>
+                <th>本地版本</th>
+                <th>最新版本</th>
+                <th>状态</th>
+                <th>进度</th>
+              </tr>
+            </thead>
+            <tbody id="updateTableBody"></tbody>
+          </table>
+        </div>
+        <div class="terminal-view update-log-box" id="updateLogBox"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-subtle" id="btnUpdateCheck">重新检查</button>
+        <button class="btn-subtle" id="btnUpdateOpenTool">打开选中原工具</button>
+        <div class="spacer"></div>
+        <button class="btn-subtle" id="btnUpdateCancel">关闭</button>
+        <button class="btn-primary-sm" id="btnUpdateRun">更新所选脚本</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 4. 上次运行异常报告弹窗 -->
+  <div class="modal-backdrop" id="abnormalModal" style="display:none">
+    <div class="modal-card glass-panel">
+      <div class="modal-header">
+        <h3>上次运行异常摘要</h3>
+        <button class="modal-close" id="btnAbnormalDismiss">✕</button>
+      </div>
+      <div class="modal-body">
+        <p class="modal-desc">上一轮调度执行过程中检测到以下异常事件：</p>
+        <div class="abnormal-list" id="abnormalList"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-subtle" id="btnAbnormalOpenLogs">打开日志目录</button>
+        <button class="btn-primary-sm" id="btnAbnormalOk">我知道了</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 5. 关机倒计时弹窗 -->
+  <div class="modal-backdrop" id="shutdownModal" style="display:none">
+    <div class="modal-card glass-panel modal-sm">
+      <div class="modal-header">
+        <h3>即将自动关机</h3>
+      </div>
+      <div class="modal-body center-text">
+        <p class="modal-desc">所有调度任务已完成，系统将在以下倒计时结束后关机：</p>
+        <div class="shutdown-big-num" id="shutdownCountdownNum">60s</div>
+      </div>
+      <div class="modal-footer center-footer">
+        <button class="btn-danger-soft" id="btnCancelShutdownModal">立即取消关机</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast 通知栈 -->
+  <div class="toast-stack" id="toastStack"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

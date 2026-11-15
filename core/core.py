@@ -17,6 +17,8 @@
 from __future__ import annotations
 
 import json
+import tempfile
+import uuid
 import os
 import platform
 import subprocess
@@ -35,8 +37,11 @@ from typing import Any, Dict, List, Optional
 import traceback
 import re
 
+from core.native_process import native_popen
+from core.task_results import TaskLogProbe
+
 # ============================================================
-# v0.1.1 RC1 启动器快速退出保护（开发基线 v31.17.1）
+# v1.0 RC1 启动器快速退出保护（开发基线 v31.17.1）
 #
 # 如果任务配置了“目标进程关键词”或“游戏窗口关键词”，则直接启动的
 # 脚本/启动器进程允许很快退出。此时不应立刻判定任务失败，而应继续
@@ -243,16 +248,25 @@ class TaskConfig:
     enable_watchdog: bool = False
     process_keywords: List[str] = field(default_factory=list)
     window_keywords: List[str] = field(default_factory=list)
+    monitor_absent_grace_seconds: int = 15
     # v31.15：UI 名称改为“目标进程关键词 / 游戏窗口关键词”。
     # 配置键仍保持 process_keywords / window_keywords，兼容旧配置。
     launcher_process: str = ""
     main_process: str = ""
     game_process: str = ""
+    task_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     # v31.12：任务级超时截图开关已移除。
     # 超时截图只由 AppConfig.enable_timeout_screenshot 全局控制。
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any], fallback_order: int) -> "TaskConfig":
+        try:
+            task_id = uuid.UUID(str(data.get("task_id", ""))).hex
+        except ValueError:
+            legacy_identity = json.dumps([fallback_order, data.get("name"), data.get("script_path")],
+                                         ensure_ascii=False)
+            task_id = uuid.uuid5(uuid.NAMESPACE_OID, "jiansz:" + legacy_identity).hex
+
         action = str(data.get("timeout_action", "kill_and_continue"))
         if action not in TIMEOUT_ACTIONS:
             action = "kill_and_continue"
@@ -266,6 +280,7 @@ class TaskConfig:
             concurrent_policy = "wait_all"
 
         return cls(
+            task_id=task_id,
             enabled=bool(data.get("enabled", True)),
             name=str(data.get("name", f"任务{fallback_order}")),
             script_path=str(data.get("script_path", "")),
@@ -282,6 +297,7 @@ class TaskConfig:
             enable_watchdog=bool(data.get("enable_watchdog", False)),
             process_keywords=normalize_keywords(data.get("process_keywords", [])),
             window_keywords=normalize_keywords(data.get("window_keywords", data.get("game_window_keywords", []))),
+            monitor_absent_grace_seconds=min(3600, safe_int(data.get("monitor_absent_grace_seconds", 15), 15, 1)),
             launcher_process=str(data.get("launcher_process", data.get("start_process", ""))).strip(),
             main_process=str(data.get("main_process", "")).strip(),
             game_process=str(data.get("game_process", "")).strip(),
@@ -289,6 +305,7 @@ class TaskConfig:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "task_id": self.task_id,
             "enabled": self.enabled,
             "name": self.name,
             "script_path": self.script_path,
@@ -305,6 +322,7 @@ class TaskConfig:
             "enable_watchdog": self.enable_watchdog,
             "process_keywords": normalize_keywords(self.process_keywords),
             "window_keywords": normalize_keywords(self.window_keywords),
+            "monitor_absent_grace_seconds": self.monitor_absent_grace_seconds,
             "launcher_process": self.launcher_process,
             "main_process": self.main_process,
             "game_process": self.game_process,
@@ -321,6 +339,7 @@ class AppConfig:
     windows_startup: bool = False
     enable_timeout_screenshot: bool = False
     tasks: List[TaskConfig] = field(default_factory=list)
+    extra_settings: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "AppConfig":
@@ -337,6 +356,7 @@ class AppConfig:
                     tasks.append(TaskConfig.from_dict(item, fallback_order=index))
 
         tasks.sort(key=lambda item: item.order)
+        ensure_unique_task_ids(tasks)
         for index, task in enumerate(tasks, start=1):
             task.order = index
 
@@ -349,10 +369,12 @@ class AppConfig:
             windows_startup=bool(data.get("windows_startup", False)),
             enable_timeout_screenshot=bool(data.get("enable_timeout_screenshot", False)),
             tasks=tasks,
+            extra_settings={k: v for k, v in data.items() if k not in {"theme", "shutdown_after_done", "shutdown_delay_seconds", "auto_exit_after_done", "auto_start_tasks", "windows_startup", "enable_timeout_screenshot", "tasks"}},
         )
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            **self.extra_settings,
             "theme": self.theme,
             "shutdown_after_done": self.shutdown_after_done,
             "shutdown_delay_seconds": self.shutdown_delay_seconds,
@@ -362,6 +384,14 @@ class AppConfig:
             "enable_timeout_screenshot": self.enable_timeout_screenshot,
             "tasks": [task.to_dict() for task in self.tasks],
         }
+
+
+def ensure_unique_task_ids(tasks: List[TaskConfig]) -> None:
+    seen = set()
+    for task in tasks:
+        if task.task_id in seen:
+            task.task_id = uuid.uuid4().hex
+        seen.add(task.task_id)
 
 
 class ConfigManager:
@@ -394,8 +424,21 @@ class ConfigManager:
 
     def save(self, config: AppConfig) -> None:
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.config_path.open("w", encoding="utf-8") as f:
-            json.dump(config.to_dict(), f, ensure_ascii=False, indent=2)
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
+                                         dir=self.config_path.parent, delete=False) as f:
+            pending = Path(f.name)
+            try:
+                json.dump(config.to_dict(), f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            except BaseException:
+                f.close()
+                pending.unlink(missing_ok=True)
+                raise
+        try:
+            pending.replace(self.config_path)
+        finally:
+            pending.unlink(missing_ok=True)
 
 
 class FileLogger:
@@ -445,20 +488,33 @@ class RuntimeStatsManager:
         self.stats_dir.mkdir(parents=True, exist_ok=True)
         self.history_path = self.stats_dir / "runtime_history.json"
         self._lock = threading.Lock()
+        self._save_lock = threading.Lock()
         self.records: List[Dict[str, Any]] = []
-        self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.session_id = self._new_session_id()
 
-    def add_record(self, task_name: str, elapsed_seconds: int, status: str, wait_mode: str) -> None:
+    @staticmethod
+    def _new_session_id() -> str:
+        return datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8]
+
+    def add_record(self, task_name: str, elapsed_seconds: int, status: str, wait_mode: str,
+                   *, script_path: str = "", result: str = "", source: str = "",
+                   task_id: str = "") -> dict:
         with self._lock:
-            self.records.append({
+            record = {
                 "session_id": self.session_id,
                 "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "task_name": task_name,
+                "task_id": task_id,
                 "elapsed_seconds": int(max(0, elapsed_seconds)),
                 "elapsed_text": format_seconds(int(max(0, elapsed_seconds))),
                 "status": status,
                 "wait_mode": wait_mode,
-            })
+                "script_path": script_path,
+                "result": result,
+                "source": source,
+            }
+            self.records.append(record)
+            return record
 
     def _load_history(self) -> Dict[str, Any]:
         if not self.history_path.exists():
@@ -471,6 +527,10 @@ class RuntimeStatsManager:
             return {}
 
     def save_session(self) -> List[Path]:
+        with self._save_lock:
+            return self._save_session()
+
+    def _save_session(self) -> List[Path]:
         with self._lock:
             records = list(self.records)
         if not records:
@@ -507,12 +567,16 @@ class RuntimeStatsManager:
             item["last_seconds"] = elapsed
             item["last_text"] = format_seconds(elapsed)
             item["last_time"] = r.get("time", "")
+            item["last_status"] = r.get("status", "")
             history[name] = item
 
         with self.history_path.open("w", encoding="utf-8") as f:
             json.dump(history, f, ensure_ascii=False, indent=2)
         with summary_json.open("w", encoding="utf-8") as f:
             json.dump(history, f, ensure_ascii=False, indent=2)
+        with self._lock:
+            del self.records[:len(records)]
+            self.session_id = self._new_session_id()
         return [session_json, session_csv, self.history_path, summary_json]
 
 
@@ -579,6 +643,19 @@ class ElevatedProcessAdapter:
         self.terminate()
 
 
+def resolve_task_command(task, script_path=None):
+    """解析任务的实际脚本路径及参数，供启动和更新共同使用。"""
+    configured = str(task.script_path or getattr(task, "name", "")).strip()
+    path = (script_path or Path(configured).expanduser()).resolve()
+    text = str(getattr(task, "args", "")).strip() if getattr(task, "use_args", False) else ""
+    args = [part.strip('"') for part in shlex.split(text, posix=False)] if text else []
+    if args:
+        first = Path(args[0]).expanduser()
+        if first.is_absolute() or args[0].startswith(("./", ".\\")) or first.suffix.lower() in {".exe", ".bat", ".cmd", ".py"}:
+            return (path.parent / first).resolve(), args[1:]
+    return path, args
+
+
 class ScriptRunnerWorker(QObject):
     log_signal = Signal(str)
     status_signal = Signal(str)
@@ -590,6 +667,7 @@ class ScriptRunnerWorker(QObject):
     shutdown_prompt_signal = Signal(int)
     task_error_signal = Signal(str)
     task_launch_success_signal = Signal(str)
+    task_report_signal = Signal(object)
 
     def __init__(
         self,
@@ -614,7 +692,16 @@ class ScriptRunnerWorker(QObject):
         self.current_tasks_by_pid: Dict[int, TaskConfig] = {}
         # 记录当前任务进程，用于停止执行/紧急停止等明确操作。
         self._current_lock = threading.Lock()
+        self._launch_lock = threading.Lock()
+        self._cleanup_lock = threading.Lock()
+        self._pause_lock = threading.Lock()
+        self._paused_since = None
+        self._paused_seconds = 0.0
+        self._owned_children = {}
+        self._owned_roots = {}
+        self._group_threads = []
         self.had_task_error = False
+        self.had_unverified_result = False
         self.abnormal_events: List[Dict[str, Any]] = []
         self.abnormal_report_path = self.logger.log_dir / "last_abnormal_report.json"
 
@@ -678,15 +765,33 @@ class ScriptRunnerWorker(QObject):
         self.log_signal.emit(line)
 
     def request_pause(self) -> None:
-        self.pause_event.set()
+        with self._pause_lock:
+            if self.pause_event.is_set() or self.stop_event.is_set():
+                return
+            self._paused_since = time.monotonic()
+            self.pause_event.set()
         self.status_signal.emit("已暂停")
-        self.log("收到暂停请求：任务队列会暂停计时和后续检查，已启动的外部脚本不会被强制暂停。")
+        self.log("已暂停调度和超时计时。外部脚本会继续运行。")
+
+    def _clear_pause(self) -> bool:
+        with self._pause_lock:
+            if self._paused_since is None:
+                return False
+            self._paused_seconds += time.monotonic() - self._paused_since
+            self._paused_since = None
+            self.pause_event.clear()
+            return True
+
+    def _active_time(self) -> float:
+        with self._pause_lock:
+            now = time.monotonic()
+            pending = now - self._paused_since if self._paused_since is not None else 0.0
+            return now - self._paused_seconds - pending
 
     def request_resume(self) -> None:
-        if self.pause_event.is_set():
-            self.pause_event.clear()
+        if self._clear_pause():
             self.status_signal.emit("运行中")
-            self.log("收到继续请求：任务队列恢复运行。")
+            self.log("已恢复调度。")
 
     def _wait_if_paused(self) -> None:
         while self.pause_event.is_set() and not self.stop_event.is_set():
@@ -748,13 +853,16 @@ class ScriptRunnerWorker(QObject):
                     stopped = True
                     break
 
-            with self._current_lock:
-                self.current_processes.clear()
+            if stopped or self.stop_event.is_set():
+                self._stop_owned_processes("停止执行")
+            for thread in self._group_threads:
+                thread.join()
 
-            if stopped:
+            if stopped or self.stop_event.is_set():
                 self.status_signal.emit("已停止")
                 self.log("任务队列已停止。")
                 self._save_abnormal_report()
+                self.stats_manager.save_session()
                 self.finished_signal.emit(True)
                 return
 
@@ -775,27 +883,31 @@ class ScriptRunnerWorker(QObject):
 
             self._save_abnormal_report()
 
-            if self.shutdown_after_done:
-                delay = max(1, int(self.shutdown_delay_seconds or 60))
-                self.log(f"已启用自动关机，将交由主界面弹出 {delay} 秒倒计时确认窗口。")
-                self.shutdown_prompt_signal.emit(delay)
-            else:
-                self.log("未启用自动关机。")
-
             paths = self.stats_manager.save_session()
             if paths:
                 self.log(f"本次运行耗时统计已保存：{paths[0].parent}")
+            if (self.shutdown_after_done and not self.had_task_error
+                    and not self.had_unverified_result and not self.stop_event.is_set()):
+                delay = max(1, self.shutdown_delay_seconds)
+                self.shutdown_prompt_signal.emit(delay)
             self.finished_signal.emit(self.had_task_error)
 
         except Exception as exc:
+            self.stop_event.set()
+            self._clear_pause()
+            self._stop_owned_processes("执行器异常")
+            for thread in self._group_threads:
+                thread.join()
             self.status_signal.emit("异常")
             self.log(f"执行器发生异常：{exc}")
             self.mark_task_error(f"执行器发生异常：{exc}")
             self._save_abnormal_report()
-            paths = self.stats_manager.save_session()
-            if paths:
-                self.log(f"异常前耗时统计已保存：{paths[0].parent}")
-            self.finished_signal.emit(True)
+            try:
+                self.stats_manager.save_session()
+            except Exception as stats_error:
+                self.log(f"保存运行统计失败：{stats_error}")
+            finally:
+                self.finished_signal.emit(True)
 
     def _run_concurrent_group(self, group_name: str, group_tasks: List[TaskConfig], start_index: int, total: int) -> str:
         policy = group_tasks[0].concurrent_policy if group_tasks[0].concurrent_policy in CONCURRENT_POLICIES else "wait_all"
@@ -807,17 +919,31 @@ class ScriptRunnerWorker(QObject):
         done_events = [threading.Event() for _ in group_tasks]
 
         def worker(task_index: int, task: TaskConfig) -> None:
-            result = self._run_one_task(task)
-            with lock:
-                results[task_index] = result
-            done_events[task_index].set()
+            result = "continue"
+            try:
+                result = self._run_one_task(task)
+                if result == "stop_all":
+                    self.stop_event.set()
+                    self._clear_pause()
+            except Exception as exc:
+                self.mark_task_error(f"任务「{task.name}」并发执行失败：{exc}", task.name)
+                with self._current_lock:
+                    processes = [process for process in self.current_processes
+                                 if self.current_tasks_by_pid.get(process.pid) is task]
+                self._cleanup_processes_for_tasks([task], processes, scope_label="并发异常")
+            finally:
+                with lock:
+                    results[task_index] = result
+                done_events[task_index].set()
 
         threads: List[threading.Thread] = []
         for i, task in enumerate(group_tasks):
             thread = threading.Thread(target=worker, args=(i, task), daemon=True)
             threads.append(thread)
+            self._group_threads.append(thread)
             thread.start()
-            time.sleep(0.2)
+            if self.stop_event.wait(0.2):
+                return "stop_requested"
 
         if policy == "wait_first":
             self.log(f"并发组「{group_name}」采用只等待组首任务策略；组首任务完成后会继续后续队列，其它同组任务可能仍在运行。")
@@ -961,131 +1087,71 @@ class ScriptRunnerWorker(QObject):
         return result
 
     def request_stop(self) -> None:
-        """停止执行：只收尾当前正在运行的任务。
-
-        V31.13：普通停止也接入统一清理器。
-        暂停执行不碰外部进程；停止执行只处理当前任务；紧急停止处理全部配置任务。
-        """
         self.stop_event.set()
-        self.pause_event.clear()
-        self.log("收到用户停止执行请求：正在按当前任务的启动脚本进程 → 目标进程 → 游戏窗口/扩展进程顺序收尾。")
-        with self._current_lock:
-            processes = list(self.current_processes)
-        self._cleanup_processes_for_tasks(
-            tasks=self._current_tracked_tasks(),
-            direct_processes=processes,
-            scope_label="停止执行",
-            include_window_keywords=True,
-        )
+        self._clear_pause()
+        self._stop_owned_processes("停止执行")
 
     def request_emergency_stop(self) -> None:
-        """紧急停止：停止队列，并按所有任务配置执行全局三层清理。"""
         self.stop_event.set()
-        self.pause_event.clear()
-        self.log("收到紧急停止请求：正在扫描所有任务配置，并按启动脚本进程 → 目标进程 → 游戏窗口/扩展进程顺序强制收尾。")
+        self._clear_pause()
+        self._stop_owned_processes("紧急停止")
+
+    def _stop_owned_processes(self, label: str) -> None:
+        # 和进程启动互斥，避免停止请求与新进程登记交错。
+        with self._launch_lock, self._current_lock:
+            processes = list(self._owned_roots.values())
+        self._cleanup_processes_for_tasks([], processes, scope_label=label)
+
+    def _track_children(self, process) -> None:
+        if psutil is None:
+            return
+        pid = process.pid
         with self._current_lock:
-            processes = list(self.current_processes)
-        self._cleanup_processes_for_tasks(
-            tasks=list(self.tasks),
-            direct_processes=processes,
-            scope_label="紧急停止",
-            include_window_keywords=True,
-        )
-        self.log("紧急停止处理已执行。")
-
-    def _cleanup_processes_for_tasks(
-        self,
-        tasks: List[TaskConfig],
-        direct_processes: Optional[List[subprocess.Popen[Any]]] = None,
-        scope_label: str = "进程清理",
-        include_window_keywords: bool = False,
-    ) -> None:
-        """统一进程清理入口。
-
-        - 停止执行：传当前任务。
-        - 紧急停止：传全部任务。
-        - 超时处理：传当前任务。
-        """
-        direct_processes = direct_processes or []
-        for process in direct_processes:
-            if process is not None and process.poll() is None:
-                self._terminate_process(process)
-
-        killed_keys: set[str] = set()
-        for task in tasks:
-            script_path = Path(task.script_path).expanduser() if task.script_path.strip() else None
-            task_name = task.name.strip() or f"任务{task.order}"
-            for stage, raw_names in self._task_cleanup_plan(task, script_path):
-                stage_names: List[str] = []
-                for raw_name in raw_names:
-                    for candidate in self._process_name_candidates(raw_name):
-                        self._add_unique_text(stage_names, candidate)
-                if not stage_names:
+            owned = self._owned_children.setdefault(pid, {})
+            candidates = list(owned.values())
+            try:
+                if process.poll() is None:
+                    candidates.append(psutil.Process(pid))
+            except (psutil.Error, OSError):
+                pass
+            for parent in candidates:
+                try:
+                    if parent.is_running():
+                        for child in parent.children(recursive=True):
+                            owned.setdefault(child.pid, child)
+                except (psutil.Error, OSError):
                     continue
-                self.log(f"{scope_label}：任务「{task_name}」正在清理{stage}：{', '.join(stage_names)}")
-                for raw_name in raw_names:
-                    key = str(raw_name).strip().lower()
-                    if not key or key in killed_keys:
-                        continue
-                    killed_keys.add(key)
-                    self._terminate_process_keyword(str(raw_name).strip())
-                # 给上一层退出一点时间，降低“启动脚本/目标进程重新拉起游戏”的概率。
-                time.sleep(0.35)
 
-            if include_window_keywords:
-                for keyword in normalize_keywords(task.window_keywords):
-                    self._terminate_processes_by_window_keyword(keyword, scope_label, task_name)
-
-    def _terminate_processes_by_window_keyword(self, keyword: str, scope_label: str, task_name: str) -> None:
-        """按窗口标题关键词找到窗口 PID 并结束进程树。
-
-        用于紧急停止兜底：如果用户只知道“鸣潮”这类窗口名，仍尽量关闭对应游戏窗口背后的进程。
-        """
-        keyword = str(keyword or "").strip()
-        if platform.system().lower() != "windows" or not keyword:
-            return
-        try:
-            user32 = ctypes.windll.user32
-            pids: List[int] = []
-            EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
-
-            def callback(hwnd, lparam):
-                if user32.IsWindowVisible(hwnd):
-                    length = user32.GetWindowTextLengthW(hwnd)
-                    if length > 0:
-                        buff = ctypes.create_unicode_buffer(length + 1)
-                        user32.GetWindowTextW(hwnd, buff, length + 1)
-                        if keyword.lower() in buff.value.lower():
-                            pid = wintypes.DWORD()
-                            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-                            if pid.value and int(pid.value) not in pids:
-                                pids.append(int(pid.value))
-                return True
-
-            user32.EnumWindows(EnumWindowsProc(callback), 0)
-            if not pids:
-                self.log(f"{scope_label}：任务「{task_name}」未发现游戏窗口关键词「{keyword}」对应的残留窗口。")
-                return
-            self.log(f"{scope_label}：任务「{task_name}」发现游戏窗口关键词「{keyword}」对应 PID：{', '.join(map(str, pids))}")
-            for pid in pids:
-                self._terminate_pid_tree(pid)
-        except Exception as exc:
-            self.log(f"{scope_label}：按游戏窗口关键词「{keyword}」清理失败：{exc}")
-
-    def _terminate_pid_tree(self, pid: int) -> None:
-        if platform.system().lower() != "windows" or not pid:
-            return
-        try:
-            subprocess.Popen(
-                ["taskkill", "/PID", str(int(pid)), "/T", "/F"],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                shell=False,
-            ).wait(timeout=10)
-            self.log(f"已尝试结束 PID 进程树：{pid}")
-        except Exception as exc:
-            self.log(f"结束 PID「{pid}」失败：{exc}")
+    def _cleanup_processes_for_tasks(self, tasks, direct_processes=None,
+                                     scope_label="进程清理", include_window_keywords=False) -> None:
+        # 只结束本轮登记的进程及已确认的子进程。关键词用于完成判定。
+        with self._cleanup_lock:
+            for process in direct_processes or []:
+                if self._owned_roots.get(process.pid) is not process:
+                    continue
+                self._track_children(process)
+                with self._current_lock:
+                    children = list(self._owned_children.get(process.pid, {}).values())
+                self.log(f"{scope_label}：清理本轮启动的 PID {process.pid} 及已登记的子进程。")
+                if process.poll() is None:
+                    self._terminate_process(process)
+                remaining = {}
+                for child in reversed(children):
+                    try:
+                        if child.is_running():
+                            child.kill()
+                    except psutil.NoSuchProcess:
+                        pass
+                    except (psutil.Error, OSError) as exc:
+                        remaining[child.pid] = child
+                        self.log(f"无法结束已登记的子进程 PID {child.pid}：{exc}")
+                with self._current_lock:
+                    if process.poll() is not None and not remaining:
+                        self._owned_roots.pop(process.pid, None)
+                        self._owned_children.pop(process.pid, None)
+                    else:
+                        self._owned_children[process.pid] = remaining
+                self._remove_current_process(process)
 
     def _task_monitor_spec(self, task: TaskConfig) -> Dict[str, Any]:
         """V31.17.1：把“目标进程关键词 / 游戏窗口关键词”同步为主等待逻辑。
@@ -1198,6 +1264,20 @@ class ScriptRunnerWorker(QObject):
         name = task.name.strip() or f"任务{task.order}"
         script_text = task.script_path.strip()
         timeout_seconds = max(0, int(task.timeout_minutes)) * 60
+        executable = Path(script_text or name).expanduser().resolve()
+        try:
+            executable, _ = resolve_task_command(task, executable)
+        except (ValueError, OSError):
+            pass
+        self.task_report_signal.emit({"task_id": task.task_id, "task_name": name,
+                                      "script_path": str(executable), "result": "running",
+                                      "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+
+        def record(elapsed, status, result, source=""):
+            report = self.stats_manager.add_record(name, elapsed, status, task.wait_mode,
+                                                   script_path=str(executable), result=result, source=source,
+                                                   task_id=task.task_id)
+            self.task_report_signal.emit(report)
 
         self.log(f"开始执行任务：{name}")
         self.log(f"脚本路径：{script_text}")
@@ -1207,7 +1287,7 @@ class ScriptRunnerWorker(QObject):
         if task.wait_mode == "fire_and_continue":
             self.log("等待模式：启动后不等待；此任务启动成功后会立即进入后续任务。")
         else:
-            self.log(f"监控模式：{self._monitor_spec_text(monitor_spec)}。监控目标出现后开始等待，连续消失 15 秒后继续下一个任务；超时仅作为兜底。")
+            self.log(f"监控模式：{self._monitor_spec_text(monitor_spec)}。监控目标出现后开始等待，连续消失 {task.monitor_absent_grace_seconds} 秒后继续下一个任务；超时仅作为兜底。")
         if task.concurrent_group.strip():
             self.log(f"并发组：{task.concurrent_group.strip()}，组策略：{CONCURRENT_POLICIES.get(task.concurrent_policy, task.concurrent_policy)}")
 
@@ -1215,60 +1295,74 @@ class ScriptRunnerWorker(QObject):
             message = f"任务「{name}」脚本路径为空，已跳过。"
             self.log(message)
             self.mark_task_error(message, name)
+            record(0, message, "failed")
             return "continue"
 
-        script_path = Path(script_text).expanduser()
+        script_path = Path(script_text).expanduser().resolve()
         if not script_path.exists():
             message = f"任务「{name}」脚本不存在，已跳过：{script_path}"
             self.log(message)
             self.mark_task_error(message, name)
+            record(0, message, "failed")
             return "continue"
 
         if not script_path.is_file():
             message = f"任务「{name}」路径不是文件，已跳过：{script_path}"
             self.log(message)
             self.mark_task_error(message, name)
+            record(0, message, "failed")
             return "continue"
 
         try:
+            executable, _ = resolve_task_command(task, script_path)
             command = self._build_command(script_path, task)
         except Exception as exc:
             message = f"任务「{name}」构建启动命令失败，已跳过：{exc}"
             self.log(message)
             self.mark_task_error(message, name)
+            record(0, message, "failed")
             return "continue"
 
         cwd = str(script_path.parent)
+        log_probe = TaskLogProbe.capture(executable)
 
         try:
-            process = self._start_process(command, cwd)
+            with self._launch_lock:
+                if self.stop_event.is_set():
+                    record(0, "已取消启动", "stopped")
+                    return "stop_requested"
+                process = self._start_process(command, cwd)
+                with self._current_lock:
+                    self._owned_roots[process.pid] = process
+                self._add_current_process(process, task=task)
+            self._track_children(process)
         except Exception as exc:
             message = f"任务「{name}」启动失败，已跳过：{exc}"
             self.log(message)
             self.mark_task_error(message, name)
+            record(0, message, "failed")
             return "continue"
 
-        process_names = self._process_names_for_task(task, script_path)
-        self._add_current_process(process, process_names, task)
-
         self.log(f"任务「{name}」已启动，PID：{process.pid}")
-        if process_names:
-            self.log(f"已登记可强制结束的同名进程：{', '.join(process_names)}")
-
-        start_time = time.monotonic()
+        start_time = self._active_time()
         if not self._confirm_launch_success(task, process, name, start_time, monitor_spec):
             self._remove_current_process(process)
-            self.stats_manager.add_record(name, int(time.monotonic() - start_time), "启动失败或提前退出", task.wait_mode)
+            if self.stop_event.is_set():
+                record(int(self._active_time() - start_time), "已停止", "stopped")
+                return "stop_requested"
+            record(int(self._active_time() - start_time), "启动失败或提前退出", "failed")
             return "continue"
 
         self.task_launch_success_signal.emit(name)
         if task.wait_mode == "fire_and_continue":
             self.log(f"任务「{name}」已按“启动后不等待”处理，继续后续任务。")
             self._remove_current_process(process)
-            self.stats_manager.add_record(name, 0, "启动后不等待", task.wait_mode)
+            self.had_unverified_result = True
+            self.mark_task_warning(f"任务「{name}」已启动，未等待执行结果。", name)
+            record(0, "已启动，未等待结果", "unknown")
             return "continue"
         if task.confirm_enter_delay_seconds > 0:
-            self._schedule_press_enter(task.confirm_enter_delay_seconds, name)
+            self._schedule_press_enter(task.confirm_enter_delay_seconds, name, process)
 
         last_emit_second = -1
         # v28.9：把“远早于预估时间就退出”视为问题日志。
@@ -1279,22 +1373,43 @@ class ScriptRunnerWorker(QObject):
         monitor_seen = False
         monitor_wait_logged = False
         monitor_absent_since: Optional[float] = None
-        monitor_absent_grace_seconds = 15.0
-        monitor_detect_deadline = start_time + 180  # 给 launcher / 游戏窗口最多 180 秒出现，避免加载慢误判。
+        monitor_absent_grace_seconds = max(1, min(3600, task.monitor_absent_grace_seconds))
+        handoff_deadline = None
+        warning_emitted = False
 
-        def finish_with_log(status: str, *, check_early_exit: bool = True) -> str:
-            elapsed_done = int(time.monotonic() - start_time)
+        def finish_with_log(status: str, *, check_early_exit: bool = True,
+                            verify_result: bool = True) -> str:
+            result = "unknown" if verify_result else "failed"
+            source = ""
+            if log_probe and verify_result:
+                verdict = self._read_task_result(log_probe, process, name)
+                if verdict is None:
+                    record(int(self._active_time() - start_time), "核对日志时停止", "stopped")
+                    return "stop_requested"
+                result, source = verdict.status, verdict.source
+                label = {"success": "日志确认完成", "failed": "日志确认失败",
+                         "unknown": "结果未确认"}[verdict.status]
+                suffix = f"（{verdict.source}）" if verdict.source else ""
+                message = f"任务「{name}」{label}：{verdict.evidence}{suffix}"
+                self.log(message)
+                status = f"{label}：{verdict.evidence}{suffix}"
+                if verdict.status == "failed":
+                    self.mark_task_error(message, name)
+                elif verdict.status == "unknown":
+                    self.had_unverified_result = True
+                    self.mark_task_warning(message, name)
+            elapsed_done = int(self._active_time() - start_time)
             self.elapsed_signal.emit(elapsed_done)
             self.log(f"任务「{name}」{status}，耗时：{format_seconds(elapsed_done)}。")
-            if check_early_exit and early_exit_threshold > 0 and elapsed_done < early_exit_threshold:
+            if task.enable_watchdog and check_early_exit and early_exit_threshold > 0 and elapsed_done < early_exit_threshold:
                 message = (
                     f"任务「{name}」疑似过早退出：实际耗时 {format_seconds(elapsed_done)}，"
                     f"低于预估/最大时间 1/6（{format_seconds(int(early_exit_threshold))}）。"
                 )
                 self.log(message)
-                self.mark_task_error(message, name)
+                self.mark_task_warning(message, name)
             self._remove_current_process(process)
-            self.stats_manager.add_record(name, elapsed_done, status, task.wait_mode)
+            record(elapsed_done, status, result, source)
             return "continue"
 
         while True:
@@ -1303,10 +1418,12 @@ class ScriptRunnerWorker(QObject):
                 self.log(f"任务「{name}」执行中收到停止请求，正在按统一清理顺序收尾当前任务。")
                 self._cleanup_processes_for_tasks([task], [process], scope_label="停止执行", include_window_keywords=True)
                 self._remove_current_process(process)
+                record(int(self._active_time() - start_time), "已停止", "stopped")
                 return "stop_requested"
 
+            self._track_children(process)
             return_code = process.poll()
-            now = time.monotonic()
+            now = self._active_time()
             monitor_kind = str(monitor_spec.get("kind", "direct"))
 
             # V31.17.1：新关键词字段接管主等待逻辑。
@@ -1326,19 +1443,28 @@ class ScriptRunnerWorker(QObject):
                     elif now - monitor_absent_since >= monitor_absent_grace_seconds:
                         return finish_with_log(f"{label}已连续消失 {int(monitor_absent_grace_seconds)} 秒")
                 elif return_code is not None:
+                    if handoff_deadline is None:
+                        handoff_deadline = now + 180
                     if not monitor_wait_logged:
                         monitor_wait_logged = True
                         self.log(f"直接启动进程已结束，仍在等待{label}出现：{', '.join(monitor_spec.get('keywords', []))}。")
-                    if now >= monitor_detect_deadline:
-                        message = f"直接进程已结束，180 秒内未检测到{label}「{', '.join(monitor_spec.get('keywords', []))}」，按提醒处理：可能是配置不匹配"
-                        self.log(message)
-                        self.mark_task_warning(message, name)
-                        return finish_with_log(message, check_early_exit=False)
-            else:
-                if return_code is not None:
-                    return finish_with_log(f"正常结束，退出码：{return_code}")
+                    if now >= handoff_deadline:
+                        message = f"直接进程已结束，180 秒内未检测到{label}「{', '.join(monitor_spec.get('keywords', []))}」"
+                        self.mark_task_error(message, name)
+                        return finish_with_log(message, check_early_exit=False, verify_result=False)
+            elif return_code is not None:
+                if return_code != 0:
+                    message = f"任务「{name}」异常退出，退出码：{return_code}"
+                    self.mark_task_error(message, name)
+                    return finish_with_log(message, check_early_exit=False, verify_result=False)
+                return finish_with_log("正常结束，退出码：0")
 
             elapsed = int(now - start_time)
+            if task.enable_watchdog and timeout_seconds and not warning_emitted and elapsed >= timeout_seconds * 5 / 6:
+                warning_emitted = True
+                message = f"任务「{name}」已运行至时间上限的 5/6。"
+                self.log(message)
+                self.mark_task_warning(message, name)
             if elapsed != last_emit_second:
                 last_emit_second = elapsed
                 self.elapsed_signal.emit(elapsed)
@@ -1349,6 +1475,9 @@ class ScriptRunnerWorker(QObject):
                     f"任务「{name}」已超时，最大运行时间：{task.timeout_minutes} 分钟，"
                     f"超时处理方式：{task.timeout_action}。"
                 )
+                if log_probe:
+                    verdict = log_probe.inspect(self._task_process_ids(process))
+                    timeout_message += f" 脚本日志：{verdict.evidence}"
                 self.log(timeout_message)
                 screenshot_names: List[str] = []
                 # v31.12：超时截图只受全局设置控制，不再叠加任务级开关。
@@ -1365,10 +1494,29 @@ class ScriptRunnerWorker(QObject):
                 if screenshot_names:
                     timeout_message = f"{timeout_message} 已保存现场截图：{', '.join(screenshot_names)}"
                 self.mark_task_error(timeout_message, name)
-                self.stats_manager.add_record(name, elapsed, "超时处理", task.wait_mode)
+                record(elapsed, timeout_message, "failed", verdict.source if log_probe else "")
                 return result_timeout
 
             time.sleep(0.25)
+
+    def _task_process_ids(self, process):
+        self._track_children(process)
+        with self._current_lock:
+            return {process.pid, *self._owned_children.get(process.pid, {})}
+
+    def _read_task_result(self, probe, process, name):
+        # 三月七在窗口消失后仍可能写入最终 JSON。仅在原进程仍运行时延长等待。
+        self.log(f"任务「{name}」已结束窗口或进程监控，正在核对本轮脚本日志。")
+        verdict = probe.inspect(self._task_process_ids(process))
+        timeout = 75 if probe.kind == "march7th" and (process.poll() is None or verdict.source) else 3
+        deadline = time.monotonic() + timeout
+        while not self.stop_event.is_set():
+            if verdict.pending and time.monotonic() < deadline:
+                self.stop_event.wait(0.75)
+                verdict = probe.inspect(self._task_process_ids(process))
+                continue
+            return verdict
+        return None
 
     def _confirm_launch_success(self, task: TaskConfig, process: Any, name: str, start_time: float, monitor_spec: Dict[str, Any]) -> bool:
         """启动后短暂确认，避免脚本秒退却把 UI 自动切回主界面。
@@ -1378,10 +1526,11 @@ class ScriptRunnerWorker(QObject):
         """
         confirm_seconds = 2.0
         deadline = start_time + confirm_seconds
-        while time.monotonic() < deadline:
+        while self._active_time() < deadline:
             self._wait_if_paused()
             if self.stop_event.is_set():
                 return False
+            self._track_children(process)
             return_code = process.poll()
             if return_code is not None:
                 present, matched_keyword = self._is_monitor_present(monitor_spec)
@@ -1389,7 +1538,12 @@ class ScriptRunnerWorker(QObject):
                     label = str(monitor_spec.get("label", "监控目标"))
                     self.log(f"任务「{name}」直接进程已退出，但已检测到{label}「{matched_keyword}」，判定启动成功。")
                     return True
-                message = f"工作出现了问题！！！任务「{name}」运行出现问题或者提前退出了，退出码：{return_code}。"
+                if return_code == 0 and monitor_spec.get("kind") in {"process", "window", "cmdline"}:
+                    self.log(f"任务「{name}」启动器已退出，继续等待配置的监控目标。")
+                    return True
+                if return_code == 0 and task.wait_mode != "fire_and_continue":
+                    return True
+                message = f"任务「{name}」启动阶段异常退出，退出码：{return_code}。"
                 self.log(message)
                 self.mark_task_error(message, name)
                 return False
@@ -1406,18 +1560,21 @@ class ScriptRunnerWorker(QObject):
             safe_stage = re.sub(r'[^0-9A-Za-z_\-]+', '_', stage).strip('_') or "timeout"
             path = screenshots_dir / f"{self.logger.session_label}_{now_time_text().replace(':', '')}_{safe_name}_timeout_{safe_stage}.png"
             screen = QGuiApplication.primaryScreen()
-            if screen is None:
-                self.log("超时截图失败：未找到主屏幕。")
-                return None
-            pixmap = screen.grabWindow(0)
-            if pixmap.isNull():
-                self.log("超时截图失败：截屏结果为空。")
-                return None
-            if pixmap.save(str(path), "PNG"):
+            if screen is not None:
+                pixmap = screen.grabWindow(0)
+                if not pixmap.isNull() and pixmap.save(str(path), "PNG"):
+                    self.log(f"超时现场截图已保存：{path}")
+                    return path
+            try:
+                from PIL import ImageGrab
+
+                image = ImageGrab.grab(all_screens=True)
+                image.save(str(path), "PNG")
                 self.log(f"超时现场截图已保存：{path}")
                 return path
-            self.log("超时截图失败：图片保存失败。")
-            return None
+            except Exception as grab_exc:
+                self.log(f"超时截图失败：{grab_exc}")
+                return None
         except Exception as exc:
             self.log(f"超时截图失败：{exc}")
             return None
@@ -1454,75 +1611,14 @@ class ScriptRunnerWorker(QObject):
         self._remove_current_process(process)
         return "continue"
 
-    def _split_command_text(self, command_text: str) -> List[str]:
-        """拆分 Windows 风格命令行。支持：.\\BetterGI.exe --startOneDragon。"""
-        return [part.strip('"') for part in shlex.split(command_text.strip(), posix=False)]
-
-    def _looks_like_full_command(self, command_text: str) -> bool:
-        """判断启动命令/参数栏是否写的是完整命令，而不是单纯参数。"""
-        text = command_text.strip()
-        if not text:
-            return False
-        try:
-            first = self._split_command_text(text)[0]
-        except Exception:
-            return False
-        first_lower = first.strip('"').lower()
-        return (
-            first_lower.startswith(".\\")
-            or first_lower.startswith("./")
-            or first_lower.endswith((".exe", ".bat", ".cmd", ".py"))
-            or Path(first.strip('"')).is_absolute()
-        )
-
-    def _build_full_command(self, command_text: str, cwd: Path) -> List[str]:
-        parts = self._split_command_text(command_text)
-        if not parts:
-            raise ValueError("完整命令为空")
-
-        first = parts[0].strip('"')
-        exe_path = Path(first)
-        if not exe_path.is_absolute():
-            exe_path = (cwd / exe_path).resolve()
-
-        suffix = exe_path.suffix.lower()
-        rest = parts[1:]
-
-        if suffix in {".bat", ".cmd"} and platform.system().lower() == "windows":
-            return ["cmd.exe", "/d", "/c", str(exe_path), *rest]
-        if suffix == ".py":
-            return [self._python_for_child_script(), str(exe_path), *rest]
-        return [str(exe_path), *rest]
-
     def _build_command(self, script_path: Path, task: TaskConfig) -> List[str]:
-        suffix = script_path.suffix.lower()
-
-        extra_args: List[str] = []
-        arg_text = task.args.strip() if task.use_args else ""
-
-        # 兼容两种写法：
-        # 1. 只填参数：--startOneDragon / -o -c，会自动拼到“脚本路径”后面。
-        # 2. 填完整命令：.\\BetterGI.exe --startOneDragon，会以该命令为准。
-        if arg_text:
-            if self._looks_like_full_command(arg_text):
-                return self._build_full_command(arg_text, script_path.parent)
-            extra_args = self._split_command_text(arg_text)
-
-        if suffix in {".bat", ".cmd"}:
-            if platform.system().lower() == "windows":
-                return ["cmd.exe", "/d", "/c", str(script_path), *extra_args]
-            return [str(script_path), *extra_args]
-
+        executable, args = resolve_task_command(task, script_path)
+        suffix = executable.suffix.lower()
+        if suffix in {".bat", ".cmd"} and platform.system().lower() == "windows":
+            return ["cmd.exe", "/d", "/c", str(executable), *args]
         if suffix == ".py":
-            python_executable = self._python_for_child_script()
-            return [python_executable, str(script_path), *extra_args]
-
-        if suffix == ".exe":
-            return [str(script_path), *extra_args]
-
-        # 未知后缀：尝试直接启动。
-        return [str(script_path), *extra_args]
-
+            return [self._python_for_child_script(), str(executable), *args]
+        return [str(executable), *args]
 
     def _is_process_name_running(self, process_name: str) -> bool:
         if platform.system().lower() != "windows":
@@ -1592,73 +1688,33 @@ class ScriptRunnerWorker(QObject):
         except Exception:
             return False
 
-    def _terminate_process_keyword(self, keyword: str) -> None:
-        """按配置关键词结束进程。
-
-        第一优先级：把关键词当作 Windows 镜像名，用 taskkill /IM /T /F。
-        第二优先级：如果 psutil 可用，则按进程名/命令行包含关键词兜底查杀。
-        """
-        keyword = str(keyword or "").strip()
-        if not keyword:
-            return
-
-        tried: set[str] = set()
-        for candidate in self._process_name_candidates(keyword):
-            key = candidate.lower()
-            if key in tried:
-                continue
-            tried.add(key)
-            self._terminate_process_name(candidate)
-
-        if psutil is None or platform.system().lower() != "windows":
-            return
-
-        lower_keyword = keyword.lower()
-        try:
-            current_pid = os.getpid()
-            for proc in psutil.process_iter(["pid", "name", "cmdline"]):
-                try:
-                    pid = int(proc.info.get("pid") or 0)
-                    if not pid or pid == current_pid:
-                        continue
-                    proc_name = str(proc.info.get("name") or "")
-                    cmdline_items = proc.info.get("cmdline") or []
-                    cmdline_text = " ".join(str(item) for item in cmdline_items)
-                    if lower_keyword in proc_name.lower() or lower_keyword in cmdline_text.lower():
-                        self.log(f"按目标进程关键词兜底结束：{keyword} -> PID {pid} ({proc_name})")
-                        self._terminate_pid_tree(pid)
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    continue
-                except Exception:
-                    continue
-        except Exception as exc:
-            self.log(f"按目标进程关键词「{keyword}」兜底清理失败：{exc}")
-
-    def _terminate_process_name(self, process_name: str) -> None:
-        if platform.system().lower() != "windows":
-            return
-        try:
-            subprocess.Popen(
-                ["taskkill", "/IM", process_name, "/T", "/F"],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                shell=False,
-            ).wait(timeout=10)
-            self.log(f"已尝试结束进程名：{process_name}")
-        except Exception as exc:
-            self.log(f"结束进程名「{process_name}」失败：{exc}")
-
-    def _schedule_press_enter(self, delay_seconds: int, task_name: str) -> None:
+    def _schedule_press_enter(self, delay_seconds: int, task_name: str, process) -> None:
         def worker() -> None:
-            time.sleep(max(0, int(delay_seconds)))
-            if self.stop_event.is_set():
-                return
+            deadline = self._active_time() + delay_seconds
+            while self._active_time() < deadline:
+                if self.stop_event.wait(0.2):
+                    return
+                with self._current_lock:
+                    if process not in self.current_processes:
+                        return
             try:
-                # 向当前前台确认框发送 Enter。仅建议用于你确认安全的脚本启动确认框。
-                ctypes.windll.user32.keybd_event(0x0D, 0, 0, 0)
-                ctypes.windll.user32.keybd_event(0x0D, 0, 2, 0)
-                self.log(f"任务「{task_name}」已按配置发送一次 Enter 确认键。")
+                self._track_children(process)
+                user32 = ctypes.windll.user32
+                user32.GetForegroundWindow.restype = wintypes.HWND
+                foreground = user32.GetForegroundWindow()
+                pid = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(foreground, ctypes.byref(pid))
+                with self._current_lock:
+                    if self.stop_event.is_set() or self.pause_event.is_set() or process not in self.current_processes:
+                        return
+                    child = self._owned_children.get(process.pid, {}).get(pid.value)
+                    owns_foreground = (pid.value == process.pid and process.poll() is None) or (child and child.is_running())
+                    if not owns_foreground or user32.GetForegroundWindow() != foreground:
+                        self.log(f"任务「{task_name}」未发送 Enter：当前前台窗口不属于本任务。")
+                        return
+                    user32.keybd_event(0x0D, 0, 0, 0)
+                    user32.keybd_event(0x0D, 0, 2, 0)
+                self.log(f"任务「{task_name}」已发送一次 Enter 确认键。")
             except Exception as exc:
                 self.log(f"任务「{task_name}」发送 Enter 失败：{exc}")
 
@@ -1682,7 +1738,7 @@ class ScriptRunnerWorker(QObject):
             creationflags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
 
         try:
-            return subprocess.Popen(
+            return native_popen(
                 command,
                 cwd=cwd,
                 stdin=subprocess.DEVNULL,
@@ -1772,32 +1828,6 @@ class ScriptRunnerWorker(QObject):
                 self.log(f"脚本进程已被强制结束，退出码：{process.returncode}。")
         except Exception as exc:
             self.log(f"终止脚本进程失败：{exc}")
-
-    def _schedule_shutdown(self) -> None:
-        delay = max(0, int(self.shutdown_delay_seconds))
-        self.log(f"已启用自动关机，系统将在 {delay} 秒后关机。")
-
-        if platform.system().lower() == "windows":
-            command = ["shutdown", "/s", "/t", str(delay)]
-        else:
-            # 非 Windows 环境保留一个温和实现；本项目默认 Windows。
-            minutes = max(1, delay // 60)
-            command = ["shutdown", "-h", f"+{minutes}"]
-
-        try:
-            subprocess.Popen(
-                command,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                shell=False,
-            )
-            self.log("关机命令已发送。")
-        except Exception as exc:
-            self.log(f"发送关机命令失败：{exc}")
-
-
-
 
 # ============================================================
 # V31.11 日志 Session 隔离升级

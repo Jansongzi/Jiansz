@@ -2,12 +2,11 @@
 from __future__ import annotations
 
 import sys
-from core import _write_startup_error, app_dir
+
+from core import _write_startup_error
 
 try:
-    from PySide6.QtWidgets import QApplication
-    from PySide6.QtGui import QIcon
-    from ui.main_window import MainWindow
+    from ui.web_app import run_app
 except Exception as exc:
     _write_startup_error(exc)
     print("启动失败，错误已写入 startup_error.log：", exc)
@@ -15,26 +14,14 @@ except Exception as exc:
 
 
 def main() -> int:
-    app = QApplication(sys.argv)
-
-    # 设置全局程序图标
-    base = app_dir()
-    icon_paths = [
-        base / "assets" / "icon.ico",
-        base / "icon.ico",
-    ]
-    icon = None
-    for p in icon_paths:
-        if p.exists():
-            icon = QIcon(str(p))
-            app.setWindowIcon(icon)
-            break
-
-    window = MainWindow()
-    if icon and not icon.isNull():
-        window.setWindowIcon(icon)
-    window.show()
-    return app.exec()
+    args = sys.argv[1:]
+    if not args:
+        return run_app()
+    if args in (["--start-daily"], ["--start"]):
+        return run_app(start_daily=True, agent_host=True)
+    if args == ["--agent-host"]:
+        return run_app(agent_host=True)
+    return 2
 
 
 if __name__ == "__main__":
