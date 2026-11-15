@@ -706,7 +706,7 @@ class ScriptRunnerWorker(QObject):
         self.abnormal_report_path = self.logger.log_dir / "last_abnormal_report.json"
 
     def mark_task_error(self, message: str, task_name: str = "") -> None:
-        """记录任务级异常，并通知 UI 触发简小松 error 状态。"""
+        """记录任务级异常，并通知简小松界面显示错误状态。"""
         self._record_task_issue(message, task_name, severity="error", notify_error=True)
 
     def mark_task_warning(self, message: str, task_name: str = "") -> None:
@@ -1367,7 +1367,7 @@ class ScriptRunnerWorker(QObject):
         last_emit_second = -1
         # v28.9：把“远早于预估时间就退出”视为问题日志。
         # 这里沿用表格里的“最大运行时间(分钟)”作为预估/保护时间；
-        # 若实际耗时不足 1/6，就触发 error 简小松，但不强行中断队列。
+        # 实际耗时不足预估的 1/6 时记录快速退出异常，并继续执行队列。
         early_exit_threshold = timeout_seconds / 6 if timeout_seconds > 0 else 0
 
         monitor_seen = False
