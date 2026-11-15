@@ -2,4 +2,5 @@ PySide6
 psutil
 packaging
 pywebview
+pywin32
 Pillow

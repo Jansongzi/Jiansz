@@ -5,7 +5,7 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('assets', 'assets'), ('config', 'config'), ('docs', 'docs'), ('ui/web', 'ui/web')],
+    datas=[('assets', 'assets'), ('docs', 'docs'), ('ui/web', 'ui/web')],
     hiddenimports=['webview.platforms.edgechromium', 'bottle', 'pythonnet', 'clr_loader', 'PIL.ImageGrab'],
     hookspath=[],
     hooksconfig={},

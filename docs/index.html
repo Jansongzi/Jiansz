@@ -3,156 +3,109 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>简小松（Jiansz）· 使用说明</title>
+  <title>简小松（Jiansz）· 使用文档</title>
   <style>
-    :root { color-scheme: dark; --bg: #10141c; --panel: #1b2331; --text: #edf2fa; --muted: #a6b5ca; --line: #344259; --accent: #8abaff; }
-    * { box-sizing: border-box; }
-    html { scroll-behavior: smooth; scroll-padding-top: 24px; }
-    body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.8 "Microsoft YaHei", "PingFang SC", sans-serif; }
-    a { color: var(--accent); text-underline-offset: 4px; }
-    header, .layout, footer { max-width: 1120px; margin: auto; padding: 32px; }
-    header { padding-top: 64px; border-bottom: 1px solid var(--line); }
-    .eyebrow { color: var(--accent); font-size: 13px; letter-spacing: 2px; }
-    h1 { font-size: clamp(32px, 5vw, 48px); line-height: 1.3; margin: 14px 0; }
-    h2 { font-size: 25px; margin: 0 0 20px; }
-    h3 { font-size: 18px; margin: 24px 0 8px; }
-    p { margin: 10px 0; }
-    .muted, footer { color: var(--muted); }
-    .layout { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 40px; align-items: start; }
-    nav { position: sticky; top: 24px; display: grid; gap: 8px; font-size: 14px; }
-    nav a { color: var(--muted); text-decoration: none; padding: 6px 0; }
-    nav a:hover, nav a:focus-visible { color: var(--accent); }
-    main { min-width: 0; }
-    section { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 28px; margin-bottom: 24px; }
-    figure { margin: 26px 0 0; }
-    figure img { display: block; width: 100%; height: auto; border: 1px solid var(--line); border-radius: 8px; }
-    figcaption { margin-top: 8px; color: var(--muted); font-size: 14px; }
-    table { border-collapse: collapse; width: 100%; font-size: 14px; }
-    th, td { text-align: left; padding: 12px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
-    th:first-child, td:first-child { width: 100px; white-space: nowrap; }
-    code { color: #b9d5ff; font-family: Consolas, monospace; overflow-wrap: anywhere; }
-    pre { background: #101722; border-radius: 8px; padding: 18px; overflow-x: auto; font-size: 13px; line-height: 1.7; }
-    .note { border-left: 3px solid var(--accent); padding: 8px 16px; color: var(--muted); }
-    li { margin: 8px 0; }
-    footer { font-size: 13px; border-top: 1px solid var(--line); }
-    @media (max-width: 720px) {
-      header, .layout, footer { padding: 24px 18px; }
-      header { padding-top: 36px; }
-      .layout { display: block; }
-      nav { position: static; display: flex; flex-wrap: wrap; gap: 6px 20px; margin-bottom: 24px; }
-      section { padding: 22px 18px; }
+    :root {
+      color-scheme: dark;
+      font: 16px/1.75 "Microsoft YaHei", "PingFang SC", sans-serif;
+      background: #0b1221;
+      color: #e8effc;
+      --surface: #121e32;
+      --border: #283b59;
+      --muted: #adc0da;
+      --link: #92bdff;
     }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body { margin: 0; }
+    a { color: var(--link); text-underline-offset: 0.2em; }
+    header { background: #152743; border-bottom: 1px solid var(--border); }
+    .wrap { width: min(100% - 2rem, 960px); margin-inline: auto; }
+    header .wrap { padding: 3rem 0 1.5rem; }
+    h1 { font-size: clamp(2rem, 5vw, 3rem); margin: 0; line-height: 1.25; }
+    header p { color: var(--muted); margin: 0.65rem 0 1.25rem; }
+    nav { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+    nav a { text-decoration: none; background: #203653; border-radius: 0.5rem; padding: 0.25rem 0.75rem; }
+    nav a:hover, nav a:focus-visible { background: #2c476b; text-decoration: underline; }
+    main { display: grid; gap: 1rem; padding: 1.5rem 0 3rem; }
+    section { padding: clamp(1rem, 4vw, 1.75rem); background: var(--surface); border: 1px solid var(--border); border-radius: 0.8rem; }
+    h2 { margin: 0; font-size: 1.45rem; }
+    h3 { margin: 1.25rem 0 0.35rem; font-size: 1.05rem; }
+    figure { margin: 1rem 0 0; }
+    figure img { display: block; width: 100%; height: auto; border: 1px solid var(--border); border-radius: 0.55rem; }
+    figcaption { margin-top: 0.5rem; color: var(--muted); font-size: 0.92rem; }
+    code { color: #c2d9ff; overflow-wrap: anywhere; }
+    li + li { margin-top: 0.35rem; }
     @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
   </style>
 </head>
 <body>
   <header>
-    <div class="eyebrow">JIANSZ · v0.1.1 RC1</div>
-    <h1>简小松使用说明</h1>
-    <p>把多个已有脚本串联成一条可监控、可暂停、可收尾的任务队列。</p>
-    <p class="muted">适用于当前侧栏界面 · 开发基线 v31.17.1 · Windows 10 / 11</p>
+    <div class="wrap">
+      <h1>简小松使用文档</h1>
+      <p>配置 Windows 脚本队列、检查更新，并查看运行结果。</p>
+      <nav aria-label="文档目录">
+        <a href="#first-run">首次运行</a>
+        <a href="#tasks">任务配置</a>
+        <a href="#updates">脚本更新</a>
+        <a href="#settings">全局设置</a>
+        <a href="#troubleshoot">故障排查</a>
+      </nav>
+    </div>
   </header>
-  <div class="layout">
-    <nav aria-label="使用说明目录">
-      <a href="#start">快速开始</a>
-      <a href="#pages">界面导航</a>
-      <a href="#screenshots">界面截图</a>
-      <a href="#tasks">任务配置</a>
-      <a href="#monitor">监控与收尾</a>
-      <a href="#settings">全局设置</a>
-      <a href="#files">文件与打包</a>
-      <a href="#faq">常见问题</a>
-    </nav>
-    <main>
-      <section id="start">
-        <h2>快速开始</h2>
-        <ol>
-          <li>运行 <code>Jiansz.exe</code>。如果目标脚本以管理员身份运行，请使用相同权限启动简小松。</li>
-          <li>进入“任务调度”，点击“添加任务”，选择脚本路径并填写名称、启动参数和超时时间。</li>
-          <li>按实际目标填写游戏窗口或进程关键词，先启用一个任务验证能否正常启动与结束。</li>
-          <li>回到“启动中心”点击“开始执行”。在仪表盘查看进度，在“运行日志”查看详细过程。</li>
-          <li>单任务验证通过后，再增加任务并调整顺序；任务链稳定后按需开启自动关机。</li>
-        </ol>
-        <p class="note">简小松管理已有脚本的启动和运行过程，不提供游戏内自动操作。第三方脚本的配置与启动参数请参考对应工具说明。</p>
-      </section>
-      <section id="pages">
-        <h2>界面导航</h2>
-        <table>
-          <thead><tr><th scope="col">页面</th><th scope="col">用途</th></tr></thead>
-          <tbody>
-            <tr><td>启动中心</td><td>插画横幅、开始 / 暂停 / 继续 / 停止、紧急停止、运行仪表盘与任务速览。</td></tr>
-            <tr><td>任务调度</td><td>左侧选择任务、开关启用状态及拖拽排序；右侧编辑当前任务并保存配置。</td></tr>
-            <tr><td>运行统计</td><td>查看历史任务耗时，刷新统计或打开统计目录。</td></tr>
-            <tr><td>运行日志</td><td>查看、复制、清空当前显示内容，或打开日志目录。</td></tr>
-            <tr><td>全局设置</td><td>配置任务完成后操作、系统行为、超时截图与主题。</td></tr>
-          </tbody>
-        </table>
-        <p class="note">当前立绘和气泡控件默认隐藏，状态信息请查看仪表盘、日志和异常报告。</p>
-      </section>
-      <section id="screenshots">
-        <h2>界面截图</h2>
-        <p class="muted">作者提供的 Windows 运行截图，界面版本标识为 v1.0 RC1.7。点击图片可查看原图；截图展示运行版本，源码版本号保持原样。</p>
-        <figure><a href="images/dashboard-rc1-7.png"><img src="images/dashboard-rc1-7.png" alt="启动中心 · v1.0 RC1.7" width="1770" height="1140" loading="lazy"></a><figcaption>启动中心：核心调度控制、运行仪表盘与任务速览</figcaption></figure>
-        <figure><a href="images/tasks-rc1-7.png"><img src="images/tasks-rc1-7.png" alt="任务调度 · v1.0 RC1.7" width="1770" height="1140" loading="lazy"></a><figcaption>任务调度：任务列表、启动参数、超时与完成判断策略</figcaption></figure>
-        <figure><a href="images/statistics-rc1-7.png"><img src="images/statistics-rc1-7.png" alt="运行统计 · v1.0 RC1.7" width="1770" height="1140" loading="lazy"></a><figcaption>运行统计：执行次数、累计与平均耗时、最近完成记录</figcaption></figure>
-        <figure><a href="images/logs-rc1-7.png"><img src="images/logs-rc1-7.png" alt="运行日志 · v1.0 RC1.7" width="1770" height="1140" loading="lazy"></a><figcaption>运行日志：实时日志、复制导出与自动滚动</figcaption></figure>
-        <figure><a href="images/settings-rc1-7.png"><img src="images/settings-rc1-7.png" alt="全局设置 · v1.0 RC1.7" width="1770" height="1140" loading="lazy"></a><figcaption>全局设置：开机自启动、超时截图、关机与异常提醒</figcaption></figure>
-      </section>
-      <section id="tasks">
-        <h2>任务配置</h2>
-        <h3>基础设置</h3>
-        <p>脚本路径指向要启动的工具；启动参数由该工具决定。任务名称用于界面显示，执行顺序可在左侧列表拖拽调整。未启用的任务会跳过。</p>
-        <h3>监控目标</h3>
-        <p>优先使用稳定的游戏窗口关键词，例如“原神”“鸣潮”“Endfield”“星穹铁道”。模拟器任务请先确认实际窗口标题，再填写“MuMu”或对应游戏名称。</p>
-        <p>目标进程关键词适用于后台程序或没有稳定窗口标题的工具，也可辅助停止和超时收尾。不要填写与任务无关的宽泛进程名。</p>
-        <h3>超时与高级设置</h3>
-        <p>超时是异常兜底，首次测试请预留充足时间。默认的 <code>kill_and_continue</code> 会在超时后清理相关进程并继续下一项。高级参数包含启动确认延迟、看门狗和并发分组，按实际需要配置。</p>
-        <p>配置保存在程序目录的 <code>config.json</code>。更换电脑后，需要重新检查所有脚本路径。</p>
-      </section>
-      <section id="monitor">
-        <h2>监控与收尾</h2>
-        <p>监控优先级为游戏窗口关键词、目标进程关键词，最后回退到直接启动的脚本进程。配置了外部监控目标时，启动器自身快速退出不会立即判定任务结束。</p>
-        <p>窗口连续消失 15 秒后才确认结束，以减少更新、短暂重启和窗口闪烁造成的误判。超时收尾依次处理启动脚本进程、目标进程和窗口对应的进程。</p>
-        <ul>
-          <li><strong>暂停执行：</strong>暂停调度推进，不主动关闭当前脚本或游戏。</li>
-          <li><strong>停止执行：</strong>停止当前任务，并执行对应收尾。</li>
-          <li><strong>紧急停止全部：</strong>尝试结束已登记任务的相关进程。</li>
-        </ul>
-        <p>启动失败、超时和监控异常会写入日志及运行报告；下次启动时可查看上次异常摘要。</p>
-      </section>
-      <section id="settings">
-        <h2>全局设置</h2>
-        <p>可以配置任务完成后关机及倒计时、完成后退出程序、启动后自动执行、Windows 开机自启动、超时截图和主题。首次使用建议先关闭自动执行与关机，验证任务链后再开启。</p>
-        <p>关机倒计时出现后，可使用提示窗或“启动中心”的“取消关机”按钮中止关机。</p>
-      </section>
-      <section id="files">
-        <h2>文件与打包</h2>
-        <p>源码需要 Python 3.10 或更新版本，在 Windows 的项目目录运行：</p>
-        <pre><code>py -3 -m pip install -r requirements.txt
-py -3 main.py</code></pre>
-        <p>需要管理员权限可运行 <code>run_admin.bat</code>；打包使用 <code>build_exe.bat</code>，统一读取 <code>Jiansz.spec</code>，输出到 <code>dist/Jiansz/</code>。</p>
-        <pre><code>Jiansz/
-├─ Jiansz.exe       程序入口（打包后）
-├─ config.json      任务与全局运行配置
-├─ docs/index.html  本离线使用说明
-├─ logs/            运行日志
-└─ runtime_stats/   历史耗时统计</code></pre>
-        <p>素材和离线文档由打包清单收集。发布前检查配置中的本机路径与系统行为设置，并移除运行时产生的日志和统计。</p>
-      </section>
-      <section id="faq">
-        <h2>常见问题</h2>
-        <h3>脚本单独可以运行，在这里却启动失败？</h3>
-        <p>先检查路径、参数和管理员权限，再查看“运行日志”里的具体错误。需要额外环境的脚本应先在其自身工具中完成配置。</p>
-        <h3>游戏关闭了，为什么还没有进入下一项？</h3>
-        <p>先等待连续消失确认时间，再检查是否仍有匹配关键词的其他窗口或进程。关键词过宽可能匹配到无关对象。</p>
-        <h3>说明文档打不开？</h3>
-        <p>确认 <code>docs/index.html</code> 随程序一起分发。此页面不依赖网络资源，可以直接用浏览器打开。</p>
-        <h3>更完整的手册和反馈</h3>
-        <p>源码仓库中的 <code>USER_GUIDE.md</code> 和 <code>FAQ.md</code> 提供更多配置说明。</p>
-        <p><a href="https://github.com/Jansongzi/Jiansz" target="_blank" rel="noopener noreferrer">GitHub 仓库</a> · <a href="https://space.bilibili.com/397555449" target="_blank" rel="noopener noreferrer">作者 Bilibili</a></p>
-      </section>
-    </main>
-  </div>
-  <footer>简小松（Jiansz）· 让每日清体力变得更省心。</footer>
+  <main class="wrap">
+    <section id="first-run">
+      <h2>首次运行</h2>
+      <ol>
+        <li>先独立运行第三方工具，确认脚本或启动器可用。</li>
+        <li>在<strong>任务调度</strong>中添加并保存一项任务。</li>
+        <li>回到<strong>启动中心</strong>，点击<strong>开始执行一条龙</strong>。先验证单项，再增加其他任务。</li>
+      </ol>
+      <figure>
+        <a href="images/dashboard.jpg"><img src="images/dashboard.jpg" width="1165" height="723" alt="启动中心，显示一条龙执行、运行报告和脚本更新入口"></a>
+        <figcaption>启动中心汇总队列状态、脚本日志简报和本轮运行进度。</figcaption>
+      </figure>
+    </section>
+    <section id="tasks">
+      <h2>任务配置</h2>
+      <p>点击<strong>+ 添加</strong>，填写名称和脚本或程序路径。需要参数时打开<strong>启用参数</strong>。设置最大运行时间和完成判断后，点击<strong>保存配置</strong>。</p>
+      <ul>
+        <li>程序自己运行到结束时，选择等待直接启动进程。</li>
+        <li>启动器会退出并交给另一个程序时，监控实际工作的目标进程。</li>
+        <li>需要等待游戏或模拟器窗口结束时，监控可稳定区分目标的窗口标题。</li>
+      </ul>
+      <p>可在任务队列中拖动调整顺序。需要并行时，将同组任务相邻排列，在任务详情中设置相同的并行组和策略。确认超时处理方式后再进行无人值守运行。</p>
+      <figure>
+        <a href="images/tasks.jpg"><img src="images/tasks.jpg" width="1165" height="723" loading="lazy" alt="任务调度中的任务列表、脚本路径、参数、超时和完成判断"></a>
+        <figcaption>示例任务。通过「浏览…」选择实际脚本，再核对完成判断和超时设置。</figcaption>
+      </figure>
+    </section>
+    <section id="updates">
+      <h2>脚本更新</h2>
+      <p>从启动中心的<strong>脚本更新</strong>或全局设置的<strong>打开脚本更新器</strong>进入。检查并选择需要更新的工具。未适配的工具使用各自的更新方式。</p>
+      <p>开启<strong>启动脚本前强制检查并更新</strong>时，适用工具先检查版本。有待安装的更新时会先更新。更新失败会阻止本轮任务启动。</p>
+    </section>
+    <section id="settings">
+      <h2>全局设置</h2>
+      <ul>
+        <li>按需启用 Windows 开机自启动、打开程序后自动执行、完成后关机或退出。</li>
+        <li>先验证任务能正确结束，再开启完成后关机。倒计时期间可以在界面取消关机。</li>
+        <li>QQ 邮件通知可发送异常汇总和启动前更新失败通知。填写收发邮箱及发件账号的 SMTP 授权码后，发送测试邮件验证。</li>
+      </ul>
+      <figure>
+        <a href="images/settings.jpg"><img src="images/settings.jpg" width="1165" height="723" loading="lazy" alt="全局设置中的启动策略、脚本更新器和 QQ 邮件设置"></a>
+        <figcaption>启动策略和脚本更新设置，以及使用空白示例数据的邮件设置。</figcaption>
+      </figure>
+    </section>
+    <section id="troubleshoot">
+      <h2>故障排查</h2>
+      <h3>任务没有启动</h3>
+      <p>确认任务已启用，配置已保存，路径与参数有效。若启动前更新失败，查看更新器里的结果。</p>
+      <h3>任务过早结束或一直等待</h3>
+      <p>打开<strong>运行日志</strong>核对监控目标。识别到启动器提前退出或目标仍驻留时，调整完成判断方式和关键词后单项重试。</p>
+      <h3>查看运行记录</h3>
+      <p><strong>运行统计</strong>查看用时与最近结果。启动中心的<strong>运行报告</strong>查看可识别的脚本报告。开启超时截图后，可到 <code>logs/screenshots/</code> 查看截图。</p>
+    </section>
+  </main>
 </body>
 </html>

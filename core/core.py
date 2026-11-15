@@ -41,7 +41,7 @@ from core.native_process import native_popen
 from core.task_results import TaskLogProbe
 
 # ============================================================
-# v1.0 RC1 启动器快速退出保护（开发基线 v31.17.1）
+# 启动器快速退出保护
 #
 # 如果任务配置了“目标进程关键词”或“游戏窗口关键词”，则直接启动的
 # 脚本/启动器进程允许很快退出。此时不应立刻判定任务失败，而应继续
@@ -748,7 +748,7 @@ class ScriptRunnerWorker(QObject):
             error_count = sum(1 for item in self.abnormal_events if item.get("severity", "error") == "error")
             warning_count = sum(1 for item in self.abnormal_events if item.get("severity") == "warning")
             payload = {
-                "version": "v1.0 RC1",
+                "version": "v0.1.1",
                 "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "log_file": self.logger.log_path().name,
                 "log_session": getattr(self.logger, "session_label", ""),
@@ -1154,7 +1154,7 @@ class ScriptRunnerWorker(QObject):
                 self._remove_current_process(process)
 
     def _task_monitor_spec(self, task: TaskConfig) -> Dict[str, Any]:
-        """V31.17.1：把“目标进程关键词 / 游戏窗口关键词”同步为主等待逻辑。
+        """把“目标进程关键词 / 游戏窗口关键词”同步为主等待逻辑。
 
         优先级：
         1. 游戏窗口关键词：作为主要监控目标，适合鸣潮/原神/Endfield/mumu。
@@ -1426,7 +1426,7 @@ class ScriptRunnerWorker(QObject):
             now = self._active_time()
             monitor_kind = str(monitor_spec.get("kind", "direct"))
 
-            # V31.17.1：新关键词字段接管主等待逻辑。
+            # 新关键词字段接管主等待逻辑。
             # 优先按“游戏窗口关键词”，其次按“目标进程关键词”，旧 wait_mode 只做兼容兜底。
             if monitor_kind in ("window", "process", "cmdline"):
                 present, matched_keyword = self._is_monitor_present(monitor_spec)
@@ -1521,7 +1521,7 @@ class ScriptRunnerWorker(QObject):
     def _confirm_launch_success(self, task: TaskConfig, process: Any, name: str, start_time: float, monitor_spec: Dict[str, Any]) -> bool:
         """启动后短暂确认，避免脚本秒退却把 UI 自动切回主界面。
 
-        V31.17.1：确认阶段也同步使用新监控目标。
+        确认阶段也同步使用新监控目标。
         如果启动脚本很快退出，但游戏窗口/目标进程已经出现，则仍认为启动成功。
         """
         confirm_seconds = 2.0
