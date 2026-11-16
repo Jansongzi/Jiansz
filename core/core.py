@@ -38,7 +38,8 @@ import traceback
 import re
 
 from core.native_process import native_popen
-from core.task_results import TaskLogProbe
+from core.task_results import TaskLogProbe, daily_result, script_log_kind
+from core.version import APP_VERSION
 
 # ============================================================
 # 启动器快速退出保护
@@ -121,11 +122,12 @@ except Exception as exc:
     raise
 
 
-APP_NAME = "简小松·脚本调度助手 v0.1.1"
+APP_NAME = f"简小松·脚本调度助手 {APP_VERSION}"
 CONFIG_FILE_NAME = "config.json"
 LOG_DIR_NAME = "logs"
 AUTHOR_URL = "https://space.bilibili.com/397555449?spm_id_from=333.1007.0.0"
 GITHUB_URL = "https://github.com/Jansongzi"
+PROJECT_URL = f"{GITHUB_URL}/Jiansz"
 LOCAL_DOC_RELATIVE_PATH = Path("docs") / "index.html"
 
 WAIT_MODES: Dict[str, str] = {
@@ -335,6 +337,7 @@ class AppConfig:
     shutdown_after_done: bool = False
     shutdown_delay_seconds: int = 60
     auto_exit_after_done: bool = False
+    close_to_tray: bool = False
     auto_start_tasks: bool = False
     windows_startup: bool = False
     enable_timeout_screenshot: bool = False
@@ -365,11 +368,12 @@ class AppConfig:
             shutdown_after_done=bool(data.get("shutdown_after_done", False)),
             shutdown_delay_seconds=safe_int(data.get("shutdown_delay_seconds", 60), 60, 0),
             auto_exit_after_done=bool(data.get("auto_exit_after_done", False)),
+            close_to_tray=bool(data.get("close_to_tray", False)),
             auto_start_tasks=bool(data.get("auto_start_tasks", False)),
             windows_startup=bool(data.get("windows_startup", False)),
             enable_timeout_screenshot=bool(data.get("enable_timeout_screenshot", False)),
             tasks=tasks,
-            extra_settings={k: v for k, v in data.items() if k not in {"theme", "shutdown_after_done", "shutdown_delay_seconds", "auto_exit_after_done", "auto_start_tasks", "windows_startup", "enable_timeout_screenshot", "tasks"}},
+            extra_settings={k: v for k, v in data.items() if k not in {"theme", "shutdown_after_done", "shutdown_delay_seconds", "auto_exit_after_done", "close_to_tray", "auto_start_tasks", "windows_startup", "enable_timeout_screenshot", "tasks"}},
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -379,6 +383,7 @@ class AppConfig:
             "shutdown_after_done": self.shutdown_after_done,
             "shutdown_delay_seconds": self.shutdown_delay_seconds,
             "auto_exit_after_done": self.auto_exit_after_done,
+            "close_to_tray": self.close_to_tray,
             "auto_start_tasks": self.auto_start_tasks,
             "windows_startup": self.windows_startup,
             "enable_timeout_screenshot": self.enable_timeout_screenshot,
@@ -748,7 +753,7 @@ class ScriptRunnerWorker(QObject):
             error_count = sum(1 for item in self.abnormal_events if item.get("severity", "error") == "error")
             warning_count = sum(1 for item in self.abnormal_events if item.get("severity") == "warning")
             payload = {
-                "version": "v0.1.1",
+                "version": APP_VERSION,
                 "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "log_file": self.logger.log_path().name,
                 "log_session": getattr(self.logger, "session_label", ""),
@@ -869,7 +874,7 @@ class ScriptRunnerWorker(QObject):
             if self.had_task_error:
                 self.status_signal.emit("已完成（有异常）")
                 self.progress_signal.emit(total, total)
-                self.log("任务队列执行结束，但存在启动失败、过早退出、超时强退等异常。")
+                self.log("任务队列执行结束，请查看任务报告中的异常项。")
                 self.log("异常已写入上次运行报告；下次启动会主动汇报。")
             elif self.abnormal_events:
                 self.status_signal.emit("已完成（有提醒）")
@@ -877,9 +882,9 @@ class ScriptRunnerWorker(QObject):
                 self.log("任务队列执行结束，存在配置或监控目标提醒，但未判定为严重异常。")
                 self.log("提醒已写入上次运行报告；下次启动会主动汇报。")
             else:
-                self.status_signal.emit("已完成")
+                self.status_signal.emit("已结束（结果待确认）" if self.had_unverified_result else "已完成")
                 self.progress_signal.emit(total, total)
-                self.log("所有任务执行完成。")
+                self.log("任务队列已结束。")
 
             self._save_abnormal_report()
 
@@ -1264,11 +1269,14 @@ class ScriptRunnerWorker(QObject):
         name = task.name.strip() or f"任务{task.order}"
         script_text = task.script_path.strip()
         timeout_seconds = max(0, int(task.timeout_minutes)) * 60
+        weekly_extension_seconds = 30 * 60
+        weekly_extended = False
         executable = Path(script_text or name).expanduser().resolve()
         try:
             executable, _ = resolve_task_command(task, executable)
         except (ValueError, OSError):
             pass
+        daily_only = bool(script_log_kind(executable.name))
         self.task_report_signal.emit({"task_id": task.task_id, "task_name": name,
                                       "script_path": str(executable), "result": "running",
                                       "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
@@ -1278,6 +1286,25 @@ class ScriptRunnerWorker(QObject):
                                                    script_path=str(executable), result=result, source=source,
                                                    task_id=task.task_id)
             self.task_report_signal.emit(report)
+
+        def daily_status(verdict):
+            message = f"任务「{name}」{verdict.evidence}"
+            if verdict.source:
+                message += f"（{verdict.source}）"
+            self.log(message)
+            if verdict.status == "failed":
+                self.mark_task_error(message, name)
+            elif verdict.status == "unknown":
+                self.had_unverified_result = True
+            return verdict.evidence
+
+        def record_launch_failure(message):
+            if daily_only:
+                verdict = daily_result()
+                record(0, daily_status(verdict), verdict.status)
+            else:
+                self.mark_task_error(message, name)
+                record(0, message, "failed")
 
         self.log(f"开始执行任务：{name}")
         self.log(f"脚本路径：{script_text}")
@@ -1294,23 +1321,20 @@ class ScriptRunnerWorker(QObject):
         if not script_text:
             message = f"任务「{name}」脚本路径为空，已跳过。"
             self.log(message)
-            self.mark_task_error(message, name)
-            record(0, message, "failed")
+            record_launch_failure(message)
             return "continue"
 
         script_path = Path(script_text).expanduser().resolve()
         if not script_path.exists():
             message = f"任务「{name}」脚本不存在，已跳过：{script_path}"
             self.log(message)
-            self.mark_task_error(message, name)
-            record(0, message, "failed")
+            record_launch_failure(message)
             return "continue"
 
         if not script_path.is_file():
             message = f"任务「{name}」路径不是文件，已跳过：{script_path}"
             self.log(message)
-            self.mark_task_error(message, name)
-            record(0, message, "failed")
+            record_launch_failure(message)
             return "continue"
 
         try:
@@ -1319,8 +1343,7 @@ class ScriptRunnerWorker(QObject):
         except Exception as exc:
             message = f"任务「{name}」构建启动命令失败，已跳过：{exc}"
             self.log(message)
-            self.mark_task_error(message, name)
-            record(0, message, "failed")
+            record_launch_failure(message)
             return "continue"
 
         cwd = str(script_path.parent)
@@ -1339,18 +1362,24 @@ class ScriptRunnerWorker(QObject):
         except Exception as exc:
             message = f"任务「{name}」启动失败，已跳过：{exc}"
             self.log(message)
-            self.mark_task_error(message, name)
-            record(0, message, "failed")
+            record_launch_failure(message)
             return "continue"
 
         self.log(f"任务「{name}」已启动，PID：{process.pid}")
         start_time = self._active_time()
-        if not self._confirm_launch_success(task, process, name, start_time, monitor_spec):
-            self._remove_current_process(process)
+        if not self._confirm_launch_success(task, process, name, start_time, monitor_spec, daily_only=daily_only):
             if self.stop_event.is_set():
+                self._remove_current_process(process)
                 record(int(self._active_time() - start_time), "已停止", "stopped")
                 return "stop_requested"
-            record(int(self._active_time() - start_time), "启动失败或提前退出", "failed")
+            elapsed = int(self._active_time() - start_time)
+            if daily_only:
+                # 很快退出的脚本仍可能留下“今日已完成”的可核对记录。
+                verdict = log_probe.inspect(self._task_process_ids(process))
+                record(elapsed, daily_status(verdict), verdict.status, verdict.source)
+            else:
+                record(elapsed, "启动失败或提前退出", "failed")
+            self._remove_current_process(process)
             return "continue"
 
         self.task_launch_success_signal.emit(name)
@@ -1358,8 +1387,12 @@ class ScriptRunnerWorker(QObject):
             self.log(f"任务「{name}」已按“启动后不等待”处理，继续后续任务。")
             self._remove_current_process(process)
             self.had_unverified_result = True
-            self.mark_task_warning(f"任务「{name}」已启动，未等待执行结果。", name)
-            record(0, "已启动，未等待结果", "unknown")
+            if daily_only:
+                verdict = daily_result()
+                record(0, daily_status(verdict), verdict.status)
+            else:
+                self.mark_task_warning(f"任务「{name}」已启动，未等待执行结果。", name)
+                record(0, "已启动，未等待结果", "unknown")
             return "continue"
         if task.confirm_enter_delay_seconds > 0:
             self._schedule_press_enter(task.confirm_enter_delay_seconds, name, process)
@@ -1381,27 +1414,17 @@ class ScriptRunnerWorker(QObject):
                             verify_result: bool = True) -> str:
             result = "unknown" if verify_result else "failed"
             source = ""
-            if log_probe and verify_result:
+            if daily_only:
                 verdict = self._read_task_result(log_probe, process, name)
                 if verdict is None:
                     record(int(self._active_time() - start_time), "核对日志时停止", "stopped")
                     return "stop_requested"
                 result, source = verdict.status, verdict.source
-                label = {"success": "日志确认完成", "failed": "日志确认失败",
-                         "unknown": "结果未确认"}[verdict.status]
-                suffix = f"（{verdict.source}）" if verdict.source else ""
-                message = f"任务「{name}」{label}：{verdict.evidence}{suffix}"
-                self.log(message)
-                status = f"{label}：{verdict.evidence}{suffix}"
-                if verdict.status == "failed":
-                    self.mark_task_error(message, name)
-                elif verdict.status == "unknown":
-                    self.had_unverified_result = True
-                    self.mark_task_warning(message, name)
+                status = daily_status(verdict)
             elapsed_done = int(self._active_time() - start_time)
             self.elapsed_signal.emit(elapsed_done)
             self.log(f"任务「{name}」{status}，耗时：{format_seconds(elapsed_done)}。")
-            if task.enable_watchdog and check_early_exit and early_exit_threshold > 0 and elapsed_done < early_exit_threshold:
+            if not daily_only and task.enable_watchdog and check_early_exit and early_exit_threshold > 0 and elapsed_done < early_exit_threshold:
                 message = (
                     f"任务「{name}」疑似过早退出：实际耗时 {format_seconds(elapsed_done)}，"
                     f"低于预估/最大时间 1/6（{format_seconds(int(early_exit_threshold))}）。"
@@ -1450,12 +1473,16 @@ class ScriptRunnerWorker(QObject):
                         self.log(f"直接启动进程已结束，仍在等待{label}出现：{', '.join(monitor_spec.get('keywords', []))}。")
                     if now >= handoff_deadline:
                         message = f"直接进程已结束，180 秒内未检测到{label}「{', '.join(monitor_spec.get('keywords', []))}」"
-                        self.mark_task_error(message, name)
+                        self.log(message)
+                        if not daily_only:
+                            self.mark_task_error(message, name)
                         return finish_with_log(message, check_early_exit=False, verify_result=False)
             elif return_code is not None:
                 if return_code != 0:
                     message = f"任务「{name}」异常退出，退出码：{return_code}"
-                    self.mark_task_error(message, name)
+                    self.log(message)
+                    if not daily_only:
+                        self.mark_task_error(message, name)
                     return finish_with_log(message, check_early_exit=False, verify_result=False)
                 return finish_with_log("正常结束，退出码：0")
 
@@ -1464,20 +1491,26 @@ class ScriptRunnerWorker(QObject):
                 warning_emitted = True
                 message = f"任务「{name}」已运行至时间上限的 5/6。"
                 self.log(message)
-                self.mark_task_warning(message, name)
+                if not daily_only:
+                    self.mark_task_warning(message, name)
             if elapsed != last_emit_second:
                 last_emit_second = elapsed
                 self.elapsed_signal.emit(elapsed)
 
             if timeout_seconds > 0 and elapsed >= timeout_seconds:
+                if log_probe and not weekly_extended:
+                    weekly = log_probe.active_weekly_task(self._task_process_ids(process))
+                    if weekly:
+                        weekly_extended = True
+                        timeout_seconds += weekly_extension_seconds
+                        self.log(f"任务「{name}」正在执行周常「{weekly}」，本轮上限延长至 {timeout_seconds // 60} 分钟。")
+                        continue
                 self.status_signal.emit("超时处理中")
                 timeout_message = (
-                    f"任务「{name}」已超时，最大运行时间：{task.timeout_minutes} 分钟，"
+                    f"任务「{name}」已超时，最大运行时间：{timeout_seconds // 60} 分钟，"
                     f"超时处理方式：{task.timeout_action}。"
                 )
-                if log_probe:
-                    verdict = log_probe.inspect(self._task_process_ids(process))
-                    timeout_message += f" 脚本日志：{verdict.evidence}"
+                pids = self._task_process_ids(process) if daily_only else set()
                 self.log(timeout_message)
                 screenshot_names: List[str] = []
                 # v31.12：超时截图只受全局设置控制，不再叠加任务级开关。
@@ -1493,8 +1526,12 @@ class ScriptRunnerWorker(QObject):
                         screenshot_names.append(after_path.name)
                 if screenshot_names:
                     timeout_message = f"{timeout_message} 已保存现场截图：{', '.join(screenshot_names)}"
-                self.mark_task_error(timeout_message, name)
-                record(elapsed, timeout_message, "failed", verdict.source if log_probe else "")
+                if daily_only:
+                    verdict = log_probe.inspect(pids)
+                    record(elapsed, daily_status(verdict), verdict.status, verdict.source)
+                else:
+                    self.mark_task_error(timeout_message, name)
+                    record(elapsed, timeout_message, "failed")
                 return result_timeout
 
             time.sleep(0.25)
@@ -1518,7 +1555,8 @@ class ScriptRunnerWorker(QObject):
             return verdict
         return None
 
-    def _confirm_launch_success(self, task: TaskConfig, process: Any, name: str, start_time: float, monitor_spec: Dict[str, Any]) -> bool:
+    def _confirm_launch_success(self, task: TaskConfig, process: Any, name: str, start_time: float,
+                                monitor_spec: Dict[str, Any], *, daily_only: bool = False) -> bool:
         """启动后短暂确认，避免脚本秒退却把 UI 自动切回主界面。
 
         确认阶段也同步使用新监控目标。
@@ -1545,7 +1583,8 @@ class ScriptRunnerWorker(QObject):
                     return True
                 message = f"任务「{name}」启动阶段异常退出，退出码：{return_code}。"
                 self.log(message)
-                self.mark_task_error(message, name)
+                if not daily_only:
+                    self.mark_task_error(message, name)
                 return False
             time.sleep(0.2)
         self.log(f"任务「{name}」启动确认通过：进程稳定运行超过 {int(confirm_seconds)} 秒。")

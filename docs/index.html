@@ -19,7 +19,17 @@
     html { scroll-behavior: smooth; }
     body { margin: 0; }
     a { color: var(--link); text-underline-offset: 0.2em; }
-    header { background: #152743; border-bottom: 1px solid var(--border); }
+    header {
+      background-color: #152743;
+      background-image:
+        linear-gradient(90deg, rgba(10, 15, 28, 0.94), rgba(10, 15, 28, 0.78) 45%, rgba(10, 15, 28, 0.28)),
+        linear-gradient(180deg, transparent 50%, rgba(10, 15, 28, 0.62)),
+        url("../assets/banner/banner.jpg");
+      background-position: center, center, center 22%;
+      background-size: cover;
+      background-repeat: no-repeat;
+      border-bottom: 1px solid var(--border);
+    }
     .wrap { width: min(100% - 2rem, 960px); margin-inline: auto; }
     header .wrap { padding: 3rem 0 1.5rem; }
     h1 { font-size: clamp(2rem, 5vw, 3rem); margin: 0; line-height: 1.25; }
@@ -83,12 +93,16 @@
     <section id="updates">
       <h2>脚本更新</h2>
       <p>从启动中心的<strong>脚本更新</strong>或全局设置的<strong>打开脚本更新器</strong>进入。检查并选择需要更新的工具。未适配的工具使用各自的更新方式。</p>
-      <p>开启<strong>启动脚本前强制检查并更新</strong>时，适用工具先检查版本。有待安装的更新时会先更新。更新失败会阻止本轮任务启动。</p>
+      <p>启动队列前会检查适用工具的版本并安装待更新版本。三月七遇到更新源故障时会尝试替补路径，也可在确认原版本可用后继续本轮队列。</p>
+      <p>需要安装新工具时，可点击启动中心的<strong>获取脚本</strong>查看 Mirror酱项目列表，也可从各项目的官方页面下载。</p>
     </section>
     <section id="settings">
       <h2>全局设置</h2>
       <ul>
         <li>按需启用 Windows 开机自启动、打开程序后自动执行、完成后关机或退出。</li>
+        <li>开启<strong>每日定时启动</strong>、选择时间并保存。到点时电脑需开机、已登录并保持未锁屏。</li>
+        <li>开启<strong>关闭窗口时收进系统托盘</strong>后，点关闭按钮可继续后台运行，双击托盘图标恢复窗口，右键菜单可退出。</li>
+        <li>在<strong>软件版本与关于</strong>中检查简小松自身的版本，或者打开项目主页和文档。</li>
         <li>先验证任务能正确结束，再开启完成后关机。倒计时期间可以在界面取消关机。</li>
         <li>QQ 邮件通知可发送异常汇总和启动前更新失败通知。填写收发邮箱及发件账号的 SMTP 授权码后，发送测试邮件验证。</li>
       </ul>

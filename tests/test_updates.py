@@ -8,7 +8,9 @@ import unittest
 import zipfile
 from unittest.mock import patch, Mock
 from types import SimpleNamespace
+from urllib.error import HTTPError
 
+from core import march7th_update
 from core.updates import UpdateItem, UpdateError, UpdateCancelled, discover_items, check_item, update_item, _restore_onedragon, _update_onedragon
 from ui.update_dialog import UpdateDialog
 
@@ -22,6 +24,58 @@ class Response(io.BytesIO):
 
 
 class UpdateTests(unittest.TestCase):
+    def test_march7th_403_uses_digest_for_exact_official_asset(self):
+        expected = "a" * 64
+        denied = HTTPError("https://api.github.com", 403, "Forbidden", {}, None)
+        page = ('<clipboard-copy aria-label="Copy to clipboard digest for other.zip" '
+                f'value="sha256:{"b" * 64}"></clipboard-copy>'
+                '<clipboard-copy aria-label="Copy to clipboard digest for update.7z" '
+                f'value="sha256:{expected}"></clipboard-copy>')
+        with patch.object(march7th_update, "_request", side_effect=[denied, page]) as request:
+            self.assertEqual(march7th_update._asset_digest("v2026.11.17", Event(), Mock()), expected)
+        self.assertIn("/releases/expanded_assets/v2026.11.17", request.call_args.args[0])
+
+    def test_march7th_download_failure_keeps_verified_local_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = root / "m7a.exe"
+            executable.touch()
+            version_file = root / march7th_update.VERSION_FILE
+            version_file.parent.mkdir(parents=True)
+            version_file.write_text("v2026.11.15", "utf-8")
+            item = UpdateItem("march7th", "三月七", "script", executable, latest="v2026.11.17", status="有更新")
+            with patch("core.updates._assert_idle"), patch.object(
+                march7th_update, "update", side_effect=march7th_update.UpdateDeferred("下载超时")
+            ):
+                update_item(item, Event(), Mock())
+            self.assertEqual(item.status, "沿用本地版本")
+            self.assertEqual(item.current, "v2026.11.15")
+            self.assertIn("下载超时", item.detail)
+
+    def test_march7th_failure_during_replacement_restores_old_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            version = march7th_update.VERSION_FILE
+            stage = root / ".jiansz-march7th-123"
+            package = stage / "update"
+            for target, value in ((root, "v2026.11.15"), (package, "v2026.11.17")):
+                (target / version).parent.mkdir(parents=True)
+                (target / version).write_text(value, "utf-8")
+                (target / "m7a.exe").write_text(value, "utf-8")
+            real_replace = march7th_update.os.replace
+
+            def fail_new_version(source, destination):
+                if source == package / version:
+                    raise PermissionError("file locked")
+                real_replace(source, destination)
+
+            with patch.object(march7th_update.os, "replace", side_effect=fail_new_version):
+                with self.assertRaises(march7th_update.UpdateDeferred):
+                    march7th_update._install(root, stage, "v2026.11.17", Event(), Mock(), None)
+            self.assertEqual((root / version).read_text("utf-8"), "v2026.11.15")
+            self.assertEqual((root / "m7a.exe").read_text("utf-8"), "v2026.11.15")
+            self.assertFalse((root / march7th_update.JOURNAL).exists())
+
     def test_native_updater_progress_is_read_before_version_confirmation(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)

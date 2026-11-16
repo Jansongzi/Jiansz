@@ -6,6 +6,8 @@ Windows 上的二游脚本调度助手。把已经能独立运行的工具加入
 
 ## 快速开始
 
+从 [GitHub Releases](https://github.com/Jansongzi/Jiansz/releases/latest) 下载 Windows x64 压缩包，完整解压后运行 `Jiansz.exe`。
+
 1. 在 Windows 上打开 `Jiansz.exe`，进入 **任务调度 → + 添加**。
 2. 填写任务名称和脚本或程序路径。需要参数时打开 **启用参数**，并选择完成判断方式和最大运行时间。
 3. 点击 **保存配置**。先启用一项验证它的启动和完成判断，再添加其他任务。
@@ -17,11 +19,11 @@ Windows 上的二游脚本调度助手。把已经能独立运行的工具加入
 
 | 入口 | 用途 |
 | --- | --- |
-| 启动中心 | 执行队列、查看进度与运行报告、打开脚本更新器 |
+| 启动中心 | 执行队列、查看今日简报和历史报告、更新和获取脚本 |
 | 任务调度 | 配置脚本路径、参数、顺序、完成判断、超时与并行组 |
 | 运行统计 | 查看各任务的用时、最近结果和可用的脚本运行报告 |
 | 运行日志 | 查看任务启动、监控、超时和收尾记录 |
-| 全局设置 | 配置启动前检查更新、Windows 自启、完成后关机、QQ 邮件通知 |
+| 全局设置 | 配置每日定时启动、系统托盘、开机自启、完成后关机、QQ 邮件通知，以及检查程序版本 |
 
 更多操作见 [用户指南](USER_GUIDE.md)、[离线使用文档](docs/index.html)和 [FAQ](FAQ.md)。安装版可以从窗口左下角的 **使用文档** 打开离线教程。
 
@@ -40,4 +42,4 @@ python main.py
 
 协议见 [MIT 许可证](LICENSE)。使用第三方工具时请遵守各工具和游戏的服务条款。
 
-[GitHub](https://github.com/Jansongzi) · [Bilibili](https://space.bilibili.com/397555449)
+[GitHub](https://github.com/Jansongzi/Jiansz) · [Bilibili](https://space.bilibili.com/397555449)

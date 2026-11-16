@@ -1,6 +1,6 @@
 """从本轮新增的脚本运行记录判断结果。"""
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 import hashlib
 import json
 from pathlib import Path
@@ -53,9 +53,7 @@ class TaskLogProbe:
         self.pattern = pattern
         self.started = time.time()
         self.baseline = {}
-        self.old_paths = set()
         for path in self._paths():
-            self.old_paths.add(path)
             try:
                 with path.open("rb") as file:
                     stat = path.stat()
@@ -75,24 +73,13 @@ class TaskLogProbe:
 
     def _new_lines(self):
         lines = []
-        truncated = False
-        paths = self._paths()
-        identities = set()
-        for path in paths:
-            try:
-                stat = path.stat()
-                identities.add((stat.st_dev, stat.st_ino))
-            except OSError:
-                continue
-        for path in paths:
+        for path in self._paths():
             try:
                 with path.open("rb") as file:
                     stat = path.stat()
                     if stat.st_mtime < self.started - 1:
                         continue
                     cursor = self.baseline.get((stat.st_dev, stat.st_ino))
-                    if path in self.old_paths and cursor is None and not self.baseline.keys() <= identities:
-                        truncated = True
                     offset = 0
                     if cursor:
                         previous_size, position, fingerprint = cursor
@@ -100,33 +87,45 @@ class TaskLogProbe:
                         old_bytes = file.read(previous_size - position)
                         if hashlib.sha256(old_bytes).digest() == fingerprint:
                             offset = previous_size
-                        else:
-                            truncated = True
                     if stat.st_size - offset > _MAX_BYTES:
-                        truncated = True
                         offset = stat.st_size - _MAX_BYTES
                     file.seek(offset)
                     content = file.read(_MAX_BYTES)
                 lines.extend((path.name, line) for line in content.decode("utf-8-sig", errors="replace").splitlines())
             except OSError:
-                truncated = True
-        return lines, truncated
+                continue
+        return lines
 
     def inspect(self, pids):
         if self.kind == "march7th":
-            return self._march7th(pids)
-        lines, truncated = self._new_lines()
+            run = self._march7th_run(pids)
+            if run is None:
+                return daily_result(pending=True)
+            log, data, text = run
+            activity = re.findall(r"每日实训活跃度\s*(\d+)/500\b", text)
+            completed = True if "500" in activity else (False if activity else None)
+            # 上游仅在领取后发送 DailyPracticeCompleted，500/500 本身只代表满活跃度。
+            claimed = True if re.search(r"每日实训已完成|每日实训奖励已领取|已领取全部实训奖励", text) else None
+            return daily_result(completed, claimed, log.name, pending=not data.get("ended_at"))
+        lines = self._new_lines()
         if self.kind == "bettergi":
-            result = _bettergi(lines, pids)
-        elif self.kind == "okww":
-            result = _okww(lines, pids)
-        else:
-            result = _onedragon(lines)
-        if truncated and result.status == "success":
-            return TaskResult("unknown", "日志发生覆盖或缺失，无法核对整轮记录。", result.source, True)
-        return result
+            return _bettergi(lines, pids)
+        if self.kind == "okww":
+            return _okww(lines, pids)
+        return _onedragon(self._onedragon_lines(lines))
 
-    def _march7th(self, pids):
+    def _onedragon_lines(self, lines):
+        # log.txt 可被每次启动截断或覆盖。只使用本轮时间范围内的节点。
+        start = datetime.fromtimestamp(self.started)
+        seconds = start.hour * 3600 + start.minute * 60 + start.second
+        return [
+            (name, line) for name, line in lines
+            if (stamp := re.match(r"^\[(\d{2}):(\d{2}):(\d{2})\.", line))
+            and -1 <= (int(stamp[1]) * 3600 + int(stamp[2]) * 60 + int(stamp[3])
+                       - seconds + 43200) % 86400 - 43200
+        ]
+
+    def _march7th_run(self, pids):
         matching = []
         for path in self._paths():
             try:
@@ -140,50 +139,123 @@ class TaskLogProbe:
             except (OSError, ValueError, TypeError, KeyError):
                 continue
         if not matching:
-            return TaskResult("unknown", "未找到与本次启动匹配的三月七运行记录。", pending=True)
+            return None
         _, path, data = max(matching, key=lambda item: item[0])
-        status = data.get("status")
-        if status == "success" and data.get("exit_code") in (0, None) and data.get("ended_at"):
-            return TaskResult("success", "三月七运行记录确认完成。", path.name)
-        if status in {"failed", "error", "cancelled", "canceled", "stopped", "aborted"} or data.get("exit_code") not in (None, 0):
-            return TaskResult("failed", f"三月七运行记录为 {status}，退出码 {data.get('exit_code')}。", path.name)
-        return TaskResult("unknown", "三月七尚未写入最终结果。", path.name, True)
+        log = path.with_suffix(".log")
+        try:
+            with log.open("rb") as stream:
+                stream.seek(max(0, log.stat().st_size - _MAX_BYTES))
+                text = stream.read(_MAX_BYTES).decode("utf-8-sig", errors="replace")
+        except OSError:
+            text = ""
+        return log, data, text
+
+    def active_weekly_task(self, pids):
+        """只采用本轮近期日志中的周常活动，普通报错或旧日志不能触发延时。"""
+        now = datetime.now()
+        if self.kind == "okww":
+            lines = _okww_session_lines(self._new_lines(), pids)
+            return _active_okww_weekly(lines, now)
+        if self.kind == "march7th":
+            run = self._march7th_run(pids)
+            if run is not None and not run[1].get("ended_at"):
+                return _active_march7th_weekly(run[2], now)
+        if self.kind == "onedragon":
+            return _active_onedragon_weekly(self._onedragon_lines(self._new_lines()), now)
+        return ""
+
+
+def _recent(stamp, now):
+    return stamp is not None and timedelta(seconds=-2) <= now - stamp <= timedelta(minutes=3)
+
+
+def _timestamp(line):
+    try:
+        return datetime.strptime(line[:19], "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+
+
+def _active_okww_weekly(lines, now):
+    for _, line in reversed(lines):
+        if "TaskExecutor DailyTask:" in line or "TaskExecutor TaskExecutor:Successfully Executed Task" in line:
+            return ""
+        if re.search(r"\bTaskExecutor GardenTask:", line):
+            return "鸣潮每周乐园" if _recent(_timestamp(line), now) else ""
+    return ""
+
+
+_MARCH_WEEKLY_START = re.compile(r"开始(?:刷|挑战)?[「\s]*(历战余响|模拟宇宙|差分宇宙|货币战争)")
+
+
+def _active_march7th_weekly(text, now):
+    active = ""
+    stamp = None
+    for line in text.splitlines():
+        if match := _MARCH_WEEKLY_START.search(line):
+            active = match[1]
+        elif re.search(r"^-{3,}\s*完成\s*-{3,}$|停止运行|开始领取奖励|开始清体力|开始领取每日实训奖励", line):
+            active = ""
+        if candidate := _timestamp(line):
+            stamp = candidate
+    return active if _recent(stamp, now) else ""
+
+
+_ONEDRAGON_WEEKLY = {"恶名狩猎", "式舆防卫战", "危局强袭战", "零号空洞", "丽都周纪 (领奖励)"}
+
+
+def _active_onedragon_weekly(lines, now):
+    for _, line in reversed(lines):
+        match = re.match(r"^\[(\d{2}:\d{2}:\d{2})\.\d+\].*指令\[\s*(.*?)\s*\] (.*)", line)
+        if not match:
+            continue
+        clock, application, detail = match.groups()
+        if application in {"执行应用组 one_dragon", "一条龙"} and (
+            detail.startswith(("执行成功", "执行失败")) or detail.endswith("返回状态 下一个")
+        ):
+            return ""
+        if application in _ONEDRAGON_WEEKLY:
+            try:
+                stamp = datetime.fromisoformat(f"{now.date()}T{clock}")
+            except ValueError:
+                return ""
+            if stamp - now > timedelta(hours=12):
+                stamp -= timedelta(days=1)
+            if not detail.startswith(("执行成功", "执行失败")) and _recent(stamp, now):
+                return application
+            return ""
+    return ""
+
+
+def daily_result(completed=None, claimed=None, source="", *, pending=False):
+    completion = {True: "每日委托已完成", False: "每日委托未完成", None: "每日委托未确认"}[completed]
+    reward = {True: "每日奖励已领取", False: "每日奖励未领取", None: "每日奖励未确认"}[claimed]
+    if completed is True and claimed is True:
+        return TaskResult("success", f"{completion} · {reward}", source)
+    if not pending and (completed is False or claimed is False):
+        return TaskResult("failed", f"{completion} · {reward}", source)
+    return TaskResult("unknown", f"{completion} · {reward}", source, pending)
 
 
 def _bettergi(lines, pids):
     header = re.compile(r"^\[[\d:.]+\] \[([A-Z]+)\] \[[^\]]*:P(\d+):[^\]]+\]\s*(.*)")
-    owner = None
-    has_run = False
-    finished = False
-    reported_failure = None
-    source = ""
+    owner = False
+    result = daily_result(pending=True)
     for filename, line in lines:
         match = header.match(line)
         if match:
-            owner = match if int(match[2]) in pids else None
+            owner = int(match[2]) in pids and "GameTask.Common.TaskControl" in match[3]
             continue
-        if not owner or not line.strip():
-            continue
-        level, _, component = owner.groups()
-        if "OneDragonFlowViewModel" in component:
-            if re.search(r"一条龙任务执行\s*[:：]\s*1/", line):
-                has_run, finished, reported_failure = True, False, None
-            if "一条龙和配置组任务结束" in line and has_run:
-                finished, source = True, filename
-        if has_run and level in {"ERR", "FTL"} and (
-            ("GameTask." in component or "OneDragonFlowViewModel" in component)
-            and re.search(r"执行失败|无法领取|任务.*(?:失败|异常|取消|中断)|异常退出|^\s*[\w.]+Exception:", line)
-        ):
-            reported_failure = (line.strip()[:180], filename)
-    if reported_failure:
-        evidence, source = reported_failure
-        return TaskResult("failed", evidence, source)
-    if finished:
-        return TaskResult("success", "BetterGI 已写入本轮一条龙和配置组结束记录。", source)
-    return TaskResult("unknown", "未找到与本次进程匹配的一条龙结束记录。", pending=True)
+        if owner and "检查每日奖励结果" in line:
+            if "今日奖励已领取" in line:
+                # 冒险家协会的每日委托额外奖励要求四项委托（含历练点）都完成。
+                result = daily_result(True, True, filename)
+            elif "未领取" in line:
+                result = daily_result(claimed=False, source=filename)
+    return result
 
 
-def _okww(lines, pids):
+def _okww_session_lines(lines, pids):
     sessions = []
     current = None
     for filename, line in lines:
@@ -196,65 +268,43 @@ def _okww(lines, pids):
     matched = [session for session in sessions if session[0] in pids]
     if not matched and len(sessions) == 1:
         matched = sessions
-    if len(matched) != 1:
-        return TaskResult("unknown", "未能唯一对应本轮 OK-WW 脚本日志。", pending=True)
-    completed = None
-    failure = None
-    for filename, line in matched[0][1]:
-        if re.search(r"ERROR TaskExecutor TaskExecutor:.* exception stopped\b", line):
-            failure = TaskResult("failed", "OK-WW 记录了任务异常中止。", filename)
-        if "INFO TaskExecutor TaskExecutor:TaskDisabledException, continue" in line:
-            failure = TaskResult("failed", "OK-WW 记录了任务中止。", filename)
-        if re.search(r"INFO TaskExecutor TaskExecutor:Successfully Executed Task, Exiting Game and App!", line):
-            completed = TaskResult("success", "OK-WW 执行器确认任务完成。", filename)
-    return failure or completed or TaskResult("unknown", "OK-WW 尚未写入任务完成记录。", pending=True)
+    return matched[0][1] if len(matched) == 1 else []
+
+
+def _okww(lines, pids):
+    completed = claimed = None
+    source = ""
+    for filename, line in _okww_session_lines(lines, pids):
+        if not re.search(r"TaskExecutor (?:MultiAccount)?DailyTask:", line):
+            continue
+        if re.search(r"每日任务已完成|Daily Task Completed|total daily points 100\b", line):
+            completed, source = True, filename
+        if re.search(r"每日奖励(?:已领取|领取成功)|已领取每日奖励|Daily rewards? (?:already )?claimed", line, re.I):
+            claimed, source = True, filename
+    return daily_result(completed, claimed, source, pending=True)
 
 
 def _onedragon(lines):
-    operation = re.compile(r"^\[[\d:.]+\] \[operation\.py \d+\] \[(?:INFO|ERROR)\]: 指令\[\s*(.*?)\s*\] (执行成功|执行失败) 返回状态 (.*)")
-    group = "执行应用组 one_dragon"
-    starts = [f"[ {group} ] 节点 检测游戏窗口 返回状态", "[ 一条龙 ] 节点 检测游戏窗口 返回状态"]
-    if any(sum(marker in line for _, line in lines) > 1 for marker in starts):
-        return TaskResult("unknown", "新增日志包含多次一条龙启动，无法唯一对应本轮。")
-    active = False
-    completed = None
-    unresolved = {}
-    last_operations = {}
-    subtask_failures = {}
+    completed = claimed = None
+    reward_state = ""
+    source = ""
     for filename, line in lines:
-        if f"[ {group} ] 节点 检测游戏窗口 返回状态" in line:
-            active = True
-        if active and f"[ {group} ] 节点 " in line and line.endswith("返回状态 下一个"):
-            # 组执行器即使遇到子应用失败也继续。节点之前最后结束的操作是这个应用。
-            if last_operations:
-                name, result = next(reversed(last_operations.items()))
-                if result[0] == "执行失败":
-                    subtask_failures[name] = (result[1], filename)
-                else:
-                    subtask_failures.pop(name, None)
-            last_operations.clear()
-        match = operation.match(line)
-        if not match:
+        if "指令[ 活跃度奖励 ]" not in line:
             continue
-        name, status, detail = match.groups()
-        if active and name not in {group, "一条龙"}:
-            last_operations.pop(name, None)
-            last_operations[name] = (status, detail)
-            if status == "执行失败":
-                unresolved[name] = detail
-            else:
-                unresolved.pop(name, None)
-        if name in {group, "一条龙"}:
-            if status == "执行失败":
-                return TaskResult("failed", f"绝区零一条龙执行失败：{detail[:140]}", filename)
-            if name == "一条龙" and active and detail == "全部结束":
-                completed = filename
-                break
-    if subtask_failures:
-        name, (detail, filename) = next(reversed(subtask_failures.items()))
-        return TaskResult("failed", f"{name}执行失败：{detail[:140]}", filename)
-    if completed and unresolved:
-        return TaskResult("unknown", "一条龙已结束，但日志中仍有未确认恢复的子操作失败。", completed)
-    if completed:
-        return TaskResult("success", "绝区零一条龙确认全部结束。", completed)
-    return TaskResult("unknown", "绝区零一条龙尚未写入最终结果。", pending=True)
+        state = line.partition("返回状态 ")[2]
+        if "节点 检测游戏窗口 返回状态" in line:
+            completed = claimed = None
+            reward_state = ""
+            source = filename
+        elif state in {"日常奖励领取成功", "日常奖励已领取", "日常奖励已领取或活跃度未满",
+                       "领取失败重试次数用完"}:
+            reward_state, source = state, filename
+        elif state in {"活跃度已满", "活跃度未满"}:
+            completed, source = state == "活跃度已满", filename
+            if reward_state in {"日常奖励领取成功", "日常奖励已领取"}:
+                claimed = True
+            elif completed and reward_state == "日常奖励已领取或活跃度未满":
+                claimed = True
+            elif reward_state == "领取失败重试次数用完":
+                claimed = False
+    return daily_result(completed, claimed, source, pending=completed is None)

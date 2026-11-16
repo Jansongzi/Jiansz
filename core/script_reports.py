@@ -1,6 +1,7 @@
 """将运行统计和执行器事件转换为启动中心的脚本报告。"""
 import json
 from collections import defaultdict
+from datetime import date
 from pathlib import Path, PureWindowsPath
 
 def report_payload(record) -> dict:
@@ -51,9 +52,12 @@ def iter_script_reports(stats_directory: Path, tasks):
             yield key, report_payload(record)
 
 
-def load_script_reports(stats_directory: Path, tasks) -> dict:
+def load_script_reports(stats_directory: Path, tasks, *, day: date) -> dict:
+    """保留当天每个任务最近的一次结果，按结果时间归入当天。"""
     reports = {}
+    prefix = day.isoformat()
     for key, report in iter_script_reports(stats_directory, tasks):
-        if key and (key not in reports or report["time"] >= reports[key]["time"]):
+        if (key and report["time"][:10] == prefix
+                and (key not in reports or report["time"] >= reports[key]["time"])):
             reports[key] = report
     return reports

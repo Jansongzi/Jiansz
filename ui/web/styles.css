@@ -106,6 +106,7 @@ html, body {
   font-size: 11px; font-weight: 600; color: #93c5fd;
   background: rgba(76, 141, 255, 0.14); padding: 1px 8px; border-radius: 99px;
 }
+.brand-version:empty { display: none; }
 .titlebar-right { display: flex; align-items: center; gap: 12px; -webkit-app-region: no-drag; }
 .hotkey-chip {
   display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--text-muted);
@@ -226,7 +227,7 @@ html, body {
 }
 .hero-title { font-size: 26px; font-weight: 800; color: #fff; letter-spacing: 0.3px; }
 .hero-subtitle { font-size: 13px; color: #cbd5e1; margin-top: 4px; }
-.hero-telemetry { display: flex; align-items: center; gap: 10px; }
+.hero-telemetry { display: flex; align-items: center; gap: 10px; flex-shrink: 0; white-space: nowrap; }
 .telemetry-chip {
   padding: 8px 14px; border-radius: 12px;
   background: rgba(12, 17, 30, 0.72); backdrop-filter: blur(14px);
@@ -243,6 +244,13 @@ html, body {
 }
 .btn-ghost-glass svg { width: 15px; height: 15px; color: #93c5fd; }
 .btn-ghost-glass:hover { background: rgba(30, 42, 68, 0.85); border-color: rgba(147, 197, 253, 0.5); }
+@media (max-width: 1100px) {
+  .hero-content { padding-inline: 18px; }
+  .hero-title { font-size: 22px; }
+  .hero-telemetry { gap: 7px; }
+  .hero-telemetry .btn-ghost-glass { padding-inline: 11px; }
+  .telemetry-chip { padding-inline: 10px; }
+}
 
 /* ---------- 脚本日志报告（1~5 张单行均分全铺满、零滚动） ---------- */
 .reports-section-head {
@@ -518,6 +526,7 @@ html, body {
   background: rgba(255, 255, 255, 0.055); color: #e2e8f0; border: 1px solid rgba(255, 255, 255, 0.1);
 }
 .btn-subtle:hover { background: rgba(255, 255, 255, 0.11); color: #fff; }
+#btnAppReleases[hidden] { display: none; }
 .btn-secondary {
   background: rgba(255, 255, 255, 0.07); color: #f8fafc; border: 1px solid rgba(255, 255, 255, 0.14);
 }
@@ -677,21 +686,54 @@ select option { background: #101728; color: #f8fafc; }
 .log-line.session { color: #7dd3fc; font-weight: 600; }
 
 /* ---------- 全局设置页 ---------- */
-.settings-scroll { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; padding-right: 3px; }
-.settings-group { padding: 16px 20px; }
+.settings-scroll {
+  flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column;
+  gap: 22px; padding: 4px 8px 10px 4px;
+}
+.settings-symbols { position: absolute; pointer-events: none; }
+.settings-group { display: grid; gap: 10px; }
+.settings-group > .section-head {
+  margin: 0;
+  padding: 0 0 1px;
+  border-bottom: none;
+}
+.settings-group > .section-head h3 {
+  font-size: 16px; font-weight: 700; line-height: 1.4;
+}
+.settings-group > .section-head p {
+  font-size: 12px; color: var(--text-muted); margin-top: 2px;
+}
+.setting-row, .setting-form {
+  background: var(--surface-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+}
+.setting-form { padding: 14px 16px; }
+.setting-form > .panel-head-actions {
+  justify-content: flex-end;
+}
 .mail-settings-fields {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(185px, 1fr));
-  gap: 10px; margin: 12px 0;
+  gap: 10px; margin: 0 0 12px;
 }
 .mail-settings-fields input { width: 100%; }
 .setting-row {
-  display: flex; align-items: center; justify-content: space-between; gap: 16px;
-  padding: 12px 2px; border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  display: grid; align-items: center; grid-template-columns: 24px minmax(0, 1fr) auto; column-gap: 15px;
+  min-height: 66px; padding: 12px 16px;
 }
-.setting-row:last-child { border-bottom: none; padding-bottom: 2px; }
+.setting-row > :last-child { justify-self: end; }
 .setting-title, .setting-row > label { font-size: 13.5px; font-weight: 600; color: #f8fafc; }
-.setting-desc { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+.setting-desc { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+.setting-icon {
+  width: 22px; height: 22px; justify-self: center; color: var(--text-secondary);
+  fill: none; stroke: currentColor; stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round;
+}
 .compact-num { width: 120px !important; text-align: center; font-family: var(--font-mono); }
+.daily-schedule-actions { flex-shrink: 0; }
+#dailyScheduleTime {
+  height: 34px; padding: 0 8px; border-radius: 9px;
+  color: var(--text-primary); background: var(--bg-base); border: 1px solid var(--border-subtle);
+}
 .compact-select { width: 200px !important; }
 
 /* ---------- 弹窗层 ---------- */
@@ -714,6 +756,22 @@ select option { background: #101728; color: #f8fafc; }
 .modal-close:hover { background: rgba(255, 255, 255, 0.1); color: #fff; }
 .modal-body { padding: 18px 20px; display: flex; flex-direction: column; gap: 12px; max-height: 70vh; overflow-y: auto; }
 .modal-desc { font-size: 12.5px; color: var(--text-secondary); line-height: 1.5; }
+.script-catalog-card { max-width: 620px; max-height: calc(100dvh - 48px); }
+.script-catalog-guide { display: block; width: 100%; height: min(48vh, 420px); object-fit: contain; }
+.script-catalog-choice { display: inline-flex; width: fit-content; gap: 7px; align-items: center; cursor: pointer; }
+.script-catalog-choice input {
+  appearance: none; display: grid; place-items: center; width: 16px; height: 16px;
+  background: transparent; border: 1px solid var(--text-muted); border-radius: 4px;
+}
+.script-catalog-choice input:checked { background: var(--accent); border-color: var(--accent); }
+.script-catalog-choice input:checked::after {
+  content: ""; width: 4px; height: 8px; border: solid #fff; border-width: 0 2px 2px 0;
+  transform: translateY(-1px) rotate(45deg);
+}
+.script-catalog-choice input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.script-catalog-choice:has(input:disabled) { opacity: .55; cursor: default; }
+#btnConfirmScriptCatalog { min-width: 148px; }
+#btnConfirmScriptCatalog:disabled { opacity: .55; cursor: default; }
 .modal-footer {
   padding: 13px 20px; display: flex; align-items: center; justify-content: flex-end; gap: 8px;
   border-top: 1px solid rgba(255, 255, 255, 0.07); background: rgba(9, 13, 24, 0.4);

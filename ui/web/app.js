@@ -123,6 +123,8 @@
       refreshStats();
     } else if (pageName === "logs") {
       scrollLogsToBottom();
+    } else if (pageName === "settings") {
+      updateDailySchedule();
     }
   }
 
@@ -172,10 +174,11 @@
       else if (result === "unknown") counts.unknown += 1;
       else counts.pending += 1;
 
-      const label = REPORT_LABELS[result] || "待执行";
+      const dailyResult = report?.status?.startsWith("每日委托");
+      const label = dailyResult ? ({success: "每日达成", failed: "每日目标未达成", unknown: "每日待确认"}[result]) : (REPORT_LABELS[result] || "今日待执行");
       const detail = report?.status || (result === "running"
         ? "脚本正在运行，结束后核对本轮日志。"
-        : "等待本轮调度执行后生成结果摘要");
+        : "今天还没有运行记录");
       const elapsedText = report?.elapsed || "—";
       const elapsedSec = parseMinutesSeconds(elapsedText);
       const limitSec = task.timeout_minutes > 0 ? task.timeout_minutes * 60 : 0;
@@ -187,7 +190,7 @@
       const limitBadge = limitSec > 0 ? `/ ${task.timeout_minutes}:00` : "已耗时";
       const pctBadge = elapsedSec !== null && limitSec > 0 ? `${pct}%` : "";
       const fullTime = String(report?.time || "");
-      const compactTime = fullTime ? fullTime.replace(/^\d{4}-/, "") : "暂无记录";
+      const compactTime = fullTime ? fullTime.replace(/^\d{4}-/, "") : "今日暂无记录";
       const clickableAttrs = report
         ? `data-report="${escapeHtml(task.task_id)}" role="button" tabindex="0"`
         : "";
@@ -237,7 +240,7 @@
         if (counts.success) pills.push(`<span class="summary-pill ok"><strong>${counts.success}</strong> 确认完成</span>`);
         if (counts.unknown) pills.push(`<span class="summary-pill unknown"><strong>${counts.unknown}</strong> 未确认</span>`);
         if (counts.failed) pills.push(`<span class="summary-pill fail"><strong>${counts.failed}</strong> 失败/中断</span>`);
-        if (counts.pending) pills.push(`<span class="summary-pill"><strong>${counts.pending}</strong> 待执行</span>`);
+        if (counts.pending) pills.push(`<span class="summary-pill"><strong>${counts.pending}</strong> 今日待执行</span>`);
         summaryEl.innerHTML = pills.join("");
       }
     }
@@ -578,7 +581,70 @@
     $("setShutdownAfter").checked = Boolean(cfg.shutdown_after_done);
     $("setShutdownDelay").value = Number(cfg.shutdown_delay_seconds ?? 60);
     $("setAutoExit").checked = Boolean(cfg.auto_exit_after_done);
+    $("setCloseToTray").checked = Boolean(cfg.close_to_tray);
     $("setThemeSelect").value = cfg.theme || "jiansz";
+  }
+
+  async function updateDailySchedule(save = false) {
+    if (!state.api?.get_daily_schedule) return;
+    const button = $("btnSaveDailySchedule");
+    const enabled = $("dailyScheduleEnabled");
+    const time = $("dailyScheduleTime");
+    const status = $("dailyScheduleStatus");
+    if (button.dataset.busy) return;
+    if (save && enabled.checked && !time.value) {
+      showToast("请选择每日启动时间", "error");
+      return;
+    }
+    button.dataset.busy = "true";
+    button.disabled = enabled.disabled = time.disabled = true;
+    status.textContent = save ? "正在保存…" : "正在读取 Windows 计划任务…";
+    let editable = save;
+    try {
+      const result = save ? await state.api.save_daily_schedule(enabled.checked, time.value)
+                          : await state.api.get_daily_schedule();
+      if (!result.ok) {
+        status.textContent = result.error || "无法读取定时启动设置。";
+        return;
+      }
+      editable = true;
+      enabled.checked = result.enabled;
+      time.value = result.time;
+      status.textContent = result.enabled
+        ? (result.nextRun ? `下次启动：${result.nextRun}` : `每天 ${result.time} 启动`)
+        : "定时启动已关闭";
+      if (save) showToast("定时启动设置已保存", "ok");
+    } catch (_) {
+      status.textContent = "无法连接 Windows 任务计划程序。";
+    } finally {
+      delete button.dataset.busy;
+      button.disabled = enabled.disabled = !editable;
+      time.disabled = !editable || !enabled.checked;
+    }
+  }
+
+  async function checkAppUpdate() {
+    const button = $("btnCheckAppUpdate");
+    const status = $("appReleaseStatus");
+    const releases = $("btnAppReleases");
+    button.disabled = true;
+    releases.hidden = true;
+    status.textContent = "正在检查 Jiansz 更新…";
+    try {
+      const result = await state.api.check_app_update();
+      const messages = {
+        available: `发现新版本 ${result.latest}，当前版本 ${result.current}`,
+        current: `当前版本 ${result.current} 已是最新稳定版`,
+        no_release: `当前版本 ${result.current}，官方暂未发布稳定版`,
+        error: "暂时无法检查更新，请稍后重试",
+      };
+      status.textContent = messages[result.state] || messages.error;
+      releases.hidden = !["available", "no_release"].includes(result.state);
+    } catch (_) {
+      status.textContent = "暂时无法检查更新，请稍后重试";
+    } finally {
+      button.disabled = false;
+    }
   }
 
   function collectCurrentConfigPayload() {
@@ -734,14 +800,58 @@
 
   // -------------------- 弹窗层：报告、更新、异常、关机 --------------------
 
+  let scriptCatalogTimer;
+
   function openModal(id) {
     const el = $(id);
     if (el) el.style.display = "grid";
   }
 
   function closeModal(id) {
+    if (id === "scriptCatalogModal") clearInterval(scriptCatalogTimer);
     const el = $(id);
     if (el) el.style.display = "none";
+  }
+
+  function showScriptCatalogNotice(waitSeconds) {
+    const skip = $("skipScriptCatalogNotice");
+    const confirm = $("btnConfirmScriptCatalog");
+    const deadline = performance.now() + waitSeconds * 1000;
+    clearInterval(scriptCatalogTimer);
+    skip.checked = false;
+    const updateCountdown = () => {
+      const seconds = Math.max(0, Math.ceil((deadline - performance.now()) / 1000));
+      skip.disabled = confirm.disabled = seconds > 0;
+      confirm.textContent = seconds ? `前往 Mirror酱（${seconds} 秒）` : "前往 Mirror酱";
+      if (!seconds) clearInterval(scriptCatalogTimer);
+    };
+    scriptCatalogTimer = setInterval(updateCountdown, 200);
+    updateCountdown();
+    openModal("scriptCatalogModal");
+    $("scriptCatalogModal").querySelector(".modal-footer [data-close-modal]").focus();
+  }
+
+  async function openScriptCatalog(confirmed = false) {
+    if (!state.api) return;
+    const button = $(confirmed ? "btnConfirmScriptCatalog" : "btnGetScripts");
+    const skip = $("skipScriptCatalogNotice");
+    if (button.disabled) return;
+    button.disabled = true;
+    try {
+      const result = await state.api.open_script_catalog(confirmed, confirmed && skip.checked);
+      if (result.noticeRequired) {
+        showScriptCatalogNotice(result.waitSeconds);
+      } else if (result.ok) {
+        closeModal("scriptCatalogModal");
+        if (result.warning) showToast(result.warning, "error");
+      } else {
+        showToast(result.error || "打开脚本列表失败", "error");
+      }
+    } catch (_) {
+      showToast("打开脚本列表失败，请稍后重试", "error");
+    } finally {
+      button.disabled = false;
+    }
   }
 
   async function openUpdateModal(mode = "check") {
@@ -924,6 +1034,10 @@
           renderScriptReports();
         }
         break;
+      case "script_reports_reset":
+        state.scriptReports = payload || {};
+        renderScriptReports();
+        break;
       case "runner":
         state.runner = { ...state.runner, ...payload };
         renderRunnerState();
@@ -987,19 +1101,21 @@
         break;
       case "update_done":
         setUpdateBusy(false);
-        showUpdateProgress(null, {phase: state.updateCanceling ? "已取消，下载进度已保留" : (payload?.ready ? "全部就绪" : "检查 / 更新已结束"),
+        const deferred = payload?.deferred || [];
+        const deferredMessage = deferred.length ? `${deferred.join("、")}更新未完成，沿用本地版本` : "";
+        showUpdateProgress(null, {phase: state.updateCanceling ? "已取消，下载进度已保留" : (deferredMessage || (payload?.ready ? "全部就绪" : "检查 / 更新已结束")),
                                  ...(payload?.ready ? {percent:100} : {})}, false);
         if (payload?.mode === "prepare") {
           if (payload.ready) {
             closeModal("updateModal");
             const skipped = payload.unsupported || [];
-            showToast(skipped.length ? `已完成可用的版本检查，未适配：${skipped.join("、")}` : "脚本更新检查完成，开始执行任务", "ok");
+            showToast(deferredMessage || (skipped.length ? `已完成可用的版本检查，未适配：${skipped.join("、")}` : "脚本更新检查完成，开始执行任务"), "ok");
             if (!payload.agentLaunch) startTasksFlow(true);
           } else {
             $("updateModalHint").textContent = "脚本未全部就绪，任务尚未启动。请查看原因后点击“重试检查并更新”。";
           }
         } else {
-          showToast(state.updateCanceling ? "已取消更新，已下载部分保留" : (payload?.ready ? "脚本检查 / 更新已完成" : "检查 / 更新结束，请查看状态和日志"), payload?.ready ? "ok" : "error");
+          showToast(state.updateCanceling ? "已取消更新，已下载部分保留" : (deferredMessage || (payload?.ready ? "脚本检查 / 更新已完成" : "检查 / 更新结束，请查看状态和日志")), payload?.ready ? "ok" : "error");
         }
         break;
       default:
@@ -1030,7 +1146,7 @@
     // 窗口控制
     $("btnWinMin")?.addEventListener("click", () => state.api?.win_minimize());
     $("btnWinMax")?.addEventListener("click", () => state.api?.win_toggle_maximize());
-    $("btnWinClose")?.addEventListener("click", () => state.api?.win_close());
+    $("btnWinClose")?.addEventListener("click", () => state.api?.win_request_close());
 
     // 侧边栏导航
     document.querySelectorAll(".nav-item[data-page]").forEach((btn) => {
@@ -1064,6 +1180,8 @@
 
     $("btnHeroReports")?.addEventListener("click", showScriptReportHistory);
     $("btnHeroUpdates")?.addEventListener("click", () => openUpdateModal("check"));
+    $("btnGetScripts")?.addEventListener("click", () => openScriptCatalog());
+    $("btnConfirmScriptCatalog")?.addEventListener("click", () => openScriptCatalog(true));
     $("pipelineStrip")?.addEventListener("click", () => switchPage("tasks"));
     $("btnStartTasks")?.addEventListener("click", () => startTasksFlow(false));
     $("btnTasksStart")?.addEventListener("click", () => {
@@ -1256,8 +1374,13 @@
     bindSetting("setShutdownAfter", "shutdown_after_done");
     bindSetting("setShutdownDelay", "shutdown_delay_seconds", true);
     bindSetting("setAutoExit", "auto_exit_after_done");
+    bindSetting("setCloseToTray", "close_to_tray");
     bindSetting("setThemeSelect", "theme");
     $("btnOpenUpdatesSettings")?.addEventListener("click", () => openUpdateModal("check"));
+    $("dailyScheduleEnabled")?.addEventListener("change", (e) => { $("dailyScheduleTime").disabled = !e.target.checked; });
+    $("btnSaveDailySchedule")?.addEventListener("click", () => updateDailySchedule(true));
+    $("btnCheckAppUpdate")?.addEventListener("click", checkAppUpdate);
+    $("btnAboutApp")?.addEventListener("click", () => openModal("aboutAppModal"));
     $("btnSaveMail")?.addEventListener("click", () => saveMailSettings(false));
     $("btnTestMail")?.addEventListener("click", () => saveMailSettings(true));
 
@@ -1358,6 +1481,9 @@
       const boot = await state.api.get_bootstrap();
       if (!boot) return;
       state.config = boot.config;
+      $("aboutAppVersion").textContent = boot.appVersion || "";
+      $("appVersionBadge").textContent = boot.appVersion || "";
+      if (boot.appName) document.title = boot.appName;
       state.options = boot.options || state.options;
       state.scriptReports = boot.scriptReports || {};
       state.runner = boot.runner || state.runner;

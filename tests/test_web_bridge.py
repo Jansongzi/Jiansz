@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+from datetime import date
 import json
 import tempfile
 import unittest
@@ -161,7 +162,9 @@ class WebBridgeTests(unittest.TestCase):
             self.assertTrue(bridge.updates_discover()["busy"])
             self.assertIs(bridge._update_items,previous)
 
-    def test_dashboard_restores_latest_report_and_keeps_parallel_cards_separate(self):
+    @patch("ui.web_backend.date")
+    def test_dashboard_restores_todays_reports_and_refreshes_at_midnight(self, report_date):
+        report_date.today.return_value = date(2026, 11, 14)
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             shared_script = str(base / "ok-ww.exe")
@@ -197,7 +200,8 @@ class WebBridgeTests(unittest.TestCase):
             self.assertEqual([report["taskId"] for report in history], [first, disabled, ""])
             self.assertNotIn("gameStates", boot)
             self.assertFalse(hasattr(bridge, "refresh_game_notes"))
-            bridge._on_script_report({"task_id": second, "script_path": shared_script, "result": "running"})
+            bridge._on_script_report({"task_id": second, "script_path": shared_script, "result": "running",
+                                      "time": "2026-11-14 23:59:30"})
             reports = bridge.get_bootstrap()["scriptReports"]
             self.assertEqual(reports[first]["result"], "failed")
             self.assertEqual(reports[second]["result"], "running")
@@ -206,6 +210,16 @@ class WebBridgeTests(unittest.TestCase):
             self.assertEqual([task["task_id"] for task in saved["config"]["tasks"]], [second, first])
             reopened = JianszWebBridge(base).get_bootstrap()
             self.assertEqual(reopened["scriptReports"][first]["result"], "failed")
+            bridge.drain_events()
+            report_date.today.return_value = date(2026, 11, 15)
+            resets = [event for event in bridge.drain_events() if event["type"] == "script_reports_reset"]
+            self.assertEqual(len(resets), 1)
+            self.assertEqual(set(resets[0]["payload"]), {second})
+            self.assertEqual(resets[0]["payload"][second]["result"], "running")
+            self.assertEqual(JianszWebBridge(base).get_bootstrap()["scriptReports"], {})
+            self.assertEqual(bridge.get_script_report_history()[0]["time"], "2026-11-14 19:00:00")
+            bridge._on_script_report({"task_id": second, "result": "success", "time": "2026-11-15 00:01:00"})
+            self.assertEqual(bridge.get_bootstrap()["scriptReports"][second]["result"], "success")
 
     def test_legacy_task_ids_are_stable_until_config_is_saved(self):
         with tempfile.TemporaryDirectory() as tmp:

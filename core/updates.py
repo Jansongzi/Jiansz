@@ -17,9 +17,11 @@ from urllib.request import Request, urlopen
 
 from packaging.version import Version, InvalidVersion
 import psutil
+from core import march7th_update
 from core.native_process import native_popen
 from core.core import resolve_task_command
 from core.update_download import UpdateError, UpdateCancelled, download_file, report_progress
+from core.version import APP_VERSION
 
 
 @dataclass
@@ -45,6 +47,8 @@ SCRIPT_INFO = {
     "onedragon-launcher.exe": ("onedragon", "绝区零一条龙", "OneDragon-Anything/ZenlessZoneZero-OneDragon"),
     "bettergi.exe": ("bettergi", "BetterGI", "babalae/better-genshin-impact"),
 }
+
+READY_UPDATE_STATUSES = {"已是最新", "本地版本较新", "沿用本地版本"}
 
 
 def run_output(command: list[str], cwd: Path, timeout: int = 30) -> str:
@@ -131,7 +135,7 @@ def _stable_version(value: str) -> Version:
 
 def _release_version(repository: str) -> str:
     request = Request(f"https://github.com/{repository}/releases/latest",
-                      headers={"User-Agent": "Jiansz-update-check/0.1.1"})
+                      headers={"User-Agent": f"Jiansz-update-check/{APP_VERSION}"})
     for attempt in range(2):
         try:
             with urlopen(request, timeout=15) as response:
@@ -176,6 +180,12 @@ def check_item(item: UpdateItem, stop, log) -> UpdateItem:
         if item.key == "onedragon" and (item.executable.parent / ".jiansz-update.json").exists():
             _assert_idle(item.executable.parent)
             _restore_onedragon(item.executable.parent, item.executable.parent / ".jiansz-update.json")
+        if item.key == "march7th" and (item.executable.parent / march7th_update.JOURNAL).exists():
+            root = item.executable.parent
+            with march7th_update.install_lock(root):
+                _assert_idle(root)
+                march7th_update.restore(root)
+            log("已还原上次中断的三月七安装。")
         if not item.executable.is_file():
             raise UpdateError("程序路径无效，请设置正确路径。")
         item.current = local_version(item)
@@ -199,7 +209,12 @@ def check_item(item: UpdateItem, stop, log) -> UpdateItem:
                 raise UpdateError("当前更新源没有返回可识别的稳定版本。")
             item.latest = max(stable)[1]
         else:
-            item.latest = _release_version(item.repository)
+            try:
+                item.latest = _release_version(item.repository)
+            except UpdateError as exc:
+                if item.key != "march7th" or not str(exc).startswith("连接上游发布页失败"):
+                    raise
+                return _defer_march7th(item, item.current, exc, stop, log)
         current = _stable_version(item.current)
         latest = _stable_version(item.latest)
         if current < latest:
@@ -362,6 +377,24 @@ def _update_onedragon(item: UpdateItem, stop, log, progress=None) -> UpdateItem:
     return item
 
 
+def _defer_march7th(item, previous, error, stop, log, progress=None):
+    root = item.executable.parent
+    if stop.is_set():
+        raise UpdateCancelled("已停止三月七更新。")
+    with march7th_update.install_lock(root):
+        _assert_idle(root)
+        if ((root / march7th_update.JOURNAL).exists() or not item.executable.is_file()
+                or not (root / "m7a.exe").is_file() or local_version(item) != previous):
+            raise UpdateError(f"{error} 无法确认旧版完整，已暂停队列。") from error
+        _stable_version(previous)
+    item.current = previous
+    item.status = "沿用本地版本"
+    item.detail = f"{error} 本轮沿用 {previous}，下次检查将重新尝试更新。"
+    log(f"{item.name}：{item.detail}")
+    report_progress(progress, item.status, completed=1, total=1, message=item.detail)
+    return item
+
+
 def update_item(item: UpdateItem, stop, log, timeout: int = 5400, progress=None) -> UpdateItem:
     if item.status not in {"有更新", "更新失败"} or not item.latest:
         raise UpdateError("请先成功检查版本，再执行更新。")
@@ -377,8 +410,21 @@ def update_item(item: UpdateItem, stop, log, timeout: int = 5400, progress=None)
     if item.key == "onedragon":
         return _update_onedragon(item, stop, log, progress)
     if item.key == "march7th":
-        command = [str(root / "m7a.exe"), "app_update", "--after-finish", "None"]
-    elif item.key == "bettergi":
+        previous = local_version(item)
+        if _stable_version(previous) < _stable_version(item.latest):
+            try:
+                march7th_update.update(root, item.latest, stop, log, progress, _assert_idle, timeout=timeout)
+            except march7th_update.UpdateDeferred as exc:
+                return _defer_march7th(item, previous, exc, stop, log, progress)
+        item.current = local_version(item)
+        if _stable_version(item.current) < _stable_version(item.latest):
+            raise UpdateError("安装后的本地版本未达到目标版本。")
+        item.status = "已是最新"
+        item.detail = f"已校验三月七本地版本 {item.current}。"
+        log(item.detail)
+        report_progress(progress, "更新完成", completed=1, total=1, message=item.detail)
+        return item
+    if item.key == "bettergi":
         command = [str(root / "BetterGI.update.exe"), "-I", "--source", "cnb"]
     elif item.key == "okww":
         command = [str(item.executable), "-c", "start", "--auto-start", "false", "--update-method", "auto"]

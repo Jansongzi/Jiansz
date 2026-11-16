@@ -10,6 +10,8 @@ import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from core.version import APP_VERSION
+
 
 class UpdateError(RuntimeError):
     pass
@@ -43,8 +45,14 @@ def _save_metadata(path: Path, data: dict):
 
 
 def download_file(url: str, destination: Path, stop, log, progress=None,
-                  *, attempts: int = 3, timeout: int = 30, maximum: int = 2 * 1024 ** 3) -> Path:
+                  *, attempts: int = 3, timeout: int = 30, maximum: int = 2 * 1024 ** 3,
+                  deadline: float | None = None) -> Path:
     """只有匹配 URL 和服务端校验值才续传；超时保留已完成的字节。"""
+    def check_budget():
+        _check_stop(stop)
+        if deadline is not None and time.monotonic() >= deadline:
+            raise UpdateError("已达到下载总时限，已保留下载进度。")
+
     destination.parent.mkdir(parents=True, exist_ok=True)
     partial = destination.with_name(destination.name + ".part")
     metadata_path = destination.with_name(destination.name + ".json")
@@ -56,12 +64,12 @@ def download_file(url: str, destination: Path, stop, log, progress=None,
         metadata = {}
     if (metadata.get("complete") is True and destination.is_file()
             and destination.stat().st_size == metadata.get("total")):
-        _check_stop(stop)
+        check_budget()
         log("复用已完整下载的更新包，接下来校验文件。")
         report_progress(progress, "下载完成", completed=metadata["total"], total=metadata["total"], unit="bytes")
         return destination
     for attempt in range(1, attempts + 1):
-        _check_stop(stop)
+        check_budget()
         validator = metadata.get("validator")
         offset = partial.stat().st_size if partial.is_file() and validator else 0
         expected = metadata.get("total")
@@ -70,7 +78,7 @@ def download_file(url: str, destination: Path, stop, log, progress=None,
             metadata["complete"] = True
             _save_metadata(metadata_path, metadata)
             return destination
-        headers = {"User-Agent": "Jiansz-update/0.1.1", "Accept-Encoding": "identity"}
+        headers = {"User-Agent": f"Jiansz-update/{APP_VERSION}", "Accept-Encoding": "identity"}
         if offset:
             headers.update({"Range": f"bytes={offset}-", "If-Range": validator})
         report_progress(progress, "连接下载源", completed=offset, total=expected, unit="bytes",
@@ -108,7 +116,7 @@ def download_file(url: str, destination: Path, stop, log, progress=None,
                 report_progress(progress, "下载更新包", completed=transferred, total=total, unit="bytes")
                 with partial.open("ab" if offset else "wb") as output:
                     while True:
-                        _check_stop(stop)
+                        check_budget()
                         try:
                             chunk = read(64 * 1024)
                         except OSError:
@@ -130,7 +138,7 @@ def download_file(url: str, destination: Path, stop, log, progress=None,
                             last_log = now
                     output.flush()
                     os.fsync(output.fileno())
-                _check_stop(stop)
+                check_budget()
                 if total is not None and transferred != total:
                     raise URLError("连接提前结束")
                 if not transferred:
@@ -150,7 +158,7 @@ def download_file(url: str, destination: Path, stop, log, progress=None,
                 raise UpdateError(f"下载源返回 HTTP {exc.code}，正在尝试其他官方源。") from None
         except (URLError, TimeoutError, ConnectionError, HTTPException):
             pass
-        _check_stop(stop)
+        check_budget()
         if attempt < attempts:
             size = partial.stat().st_size if partial.exists() else 0
             message = f"连接中断，已保留 {size / 1024**2:.1f} MB，{attempt * 2} 秒后自动重试。"

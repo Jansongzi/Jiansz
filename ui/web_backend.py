@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date, datetime
 import json
 import os
 from pathlib import Path
@@ -37,13 +38,19 @@ from core import (
     format_seconds,
     normalize_keywords,
 )
-from core.core import ensure_unique_task_ids
+from core.app_release import RELEASES_URL, check_app_release
+from core.core import APP_VERSION, PROJECT_URL, ensure_unique_task_ids
+from core.daily_schedule import DailySchedule, ScheduleError
 from core.mail_alerts import (
     get_code, qq_address, render_mail, render_run_mail, send_mail, store_code, summarize_outcomes,
 )
 from core.native_process import native_popen
 from core.script_reports import iter_script_reports, load_script_reports, report_payload
-from core.updates import check_item, discover_items, update_item, UpdateCancelled
+from core.updates import READY_UPDATE_STATUSES, check_item, discover_items, update_item, UpdateCancelled
+
+
+SCRIPT_CATALOG_URL = "https://mirrorchyan.com/zh/projects"
+SCRIPT_CATALOG_NOTICE_SECONDS = 7
 
 
 def resolve_asset_file(base_dir: Path, *parts: str) -> Optional[Path]:
@@ -79,14 +86,19 @@ class JianszWebBridge:
         self._config_manager = ConfigManager(self._base_dir / CONFIG_FILE_NAME)
         self._file_logger = FileLogger(self._base_dir / LOG_DIR_NAME)
         self._stats_manager = RuntimeStatsManager(self._base_dir)
+        self._daily_schedule = DailySchedule(self._base_dir)
         self._config = self._config_manager.load()
         self._agent_host = agent_host
-        self._script_reports = load_script_reports(self._stats_manager.stats_dir, self._config.tasks)
+        self._script_report_day = date.today()
+        self._script_reports = load_script_reports(self._stats_manager.stats_dir, self._config.tasks,
+                                                   day=self._script_report_day)
 
         self._lock = threading.RLock()
         self._events: deque[Dict[str, Any]] = deque(maxlen=2000)
         self._logs_history: deque[str] = deque(maxlen=600)
         self._window: Any = None
+        self._hide_in_tray: Optional[Callable[[], None]] = None
+        self._script_catalog_notice_ready_at: Optional[float] = None
         self._maximized = False
 
         self._worker: Optional[ScriptRunnerWorker] = None
@@ -205,6 +217,7 @@ class JianszWebBridge:
             "shutdown_after_done": bool(self._config.shutdown_after_done),
             "shutdown_delay_seconds": int(self._config.shutdown_delay_seconds),
             "auto_exit_after_done": bool(self._config.auto_exit_after_done),
+            "close_to_tray": bool(self._config.close_to_tray),
             "auto_start_tasks": bool(self._config.auto_start_tasks),
             "windows_startup": bool(self._config.windows_startup),
             "enable_timeout_screenshot": bool(self._config.enable_timeout_screenshot),
@@ -276,6 +289,14 @@ class JianszWebBridge:
                 self._maximized = True
         return self._maximized
 
+    def win_request_close(self) -> None:
+        if not self._config.close_to_tray:
+            self.win_close()
+        elif self._hide_in_tray is not None:
+            self._hide_in_tray()
+        else:
+            self._push_event("toast", {"tone": "error", "message": "系统托盘尚未就绪，请稍后重试。"})
+
     def win_close(self) -> None:
         with self._lock:
             if self._update_busy or self._is_running:
@@ -299,13 +320,27 @@ class JianszWebBridge:
 
     # -------------------- 启动初始化与轮询 --------------------
 
+    def _refresh_script_report_day(self) -> None:
+        """由轮询触发换日，保留正在进行的跨午夜任务。调用方持有锁。"""
+        today = date.today()
+        if today == self._script_report_day:
+            return
+        reports = load_script_reports(self._stats_manager.stats_dir, self._config.tasks, day=today)
+        reports.update((key, report) for key, report in self._script_reports.items()
+                       if report["result"] == "running" or report["time"][:10] == today.isoformat())
+        self._script_report_day = today
+        self._script_reports = reports
+        self._push_event("script_reports_reset", dict(reports))
+
     def get_bootstrap(self) -> Dict[str, Any]:
         with self._lock:
+            self._refresh_script_report_day()
             logs = list(self._logs_history)
             reports = {key: dict(value) for key, value in self._script_reports.items()}
             self._events = deque((e for e in self._events if e.get("type") != "log"), maxlen=2000)
         return {
             "appName": APP_NAME,
+            "appVersion": APP_VERSION,
             "config": self._serialize_config(),
             "stats": self._read_stats_payload(),
             "logs": logs,
@@ -326,6 +361,7 @@ class JianszWebBridge:
 
     def drain_events(self) -> List[Dict[str, Any]]:
         with self._lock:
+            self._refresh_script_report_day()
             items = list(self._events)
             self._events.clear()
         return items
@@ -447,6 +483,7 @@ class JianszWebBridge:
                 shutdown_after_done=bool(payload.get("shutdown_after_done", False)),
                 shutdown_delay_seconds=max(0, int(payload.get("shutdown_delay_seconds", 60))),
                 auto_exit_after_done=bool(payload.get("auto_exit_after_done", False)),
+                close_to_tray=bool(payload.get("close_to_tray", self._config.close_to_tray)),
                 auto_start_tasks=bool(payload.get("auto_start_tasks", False)),
                 windows_startup=bool(payload.get("windows_startup", False)),
                 enable_timeout_screenshot=bool(payload.get("enable_timeout_screenshot", False)),
@@ -503,6 +540,7 @@ class JianszWebBridge:
                 shutdown_after_done=self._config.shutdown_after_done,
                 shutdown_delay_seconds=self._config.shutdown_delay_seconds,
                 auto_exit_after_done=self._config.auto_exit_after_done,
+                close_to_tray=self._config.close_to_tray,
                 auto_start_tasks=self._config.auto_start_tasks,
                 windows_startup=False,
                 tasks=list(self._config.tasks),
@@ -541,7 +579,9 @@ class JianszWebBridge:
                                               "tasks": [task.to_dict() for task in imported.tasks]})
                 self._config_manager.save(config)
                 self._config = config
-                self._script_reports = load_script_reports(self._stats_manager.stats_dir, config.tasks)
+                self._script_report_day = date.today()
+                self._script_reports = load_script_reports(self._stats_manager.stats_dir, config.tasks,
+                                                           day=self._script_report_day)
                 reports = dict(self._script_reports)
             self._append_log(f"配置已导入并保存：{path}")
             return {"ok": True, "path": str(path), "config": self._serialize_config(), "scriptReports": reports}
@@ -550,6 +590,21 @@ class JianszWebBridge:
             return {"ok": False, "error": str(exc)}
 
     # -------------------- 任务调度引擎 --------------------
+
+    def get_daily_schedule(self) -> Dict[str, Any]:
+        try:
+            return {"ok": True, **self._daily_schedule.get()}
+        except ScheduleError as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def save_daily_schedule(self, enabled: bool, clock: str) -> Dict[str, Any]:
+        with self._lock:
+            try:
+                schedule = self._daily_schedule.save(bool(enabled), str(clock))
+            except ScheduleError as exc:
+                return {"ok": False, "error": str(exc)}
+        self._append_log(f"每日定时启动已设为 {schedule['time']}。" if schedule["enabled"] else "每日定时启动已关闭。")
+        return {"ok": True, **schedule}
 
     def _agent_command(self, action: str) -> Dict[str, Any]:
         with self._lock:
@@ -695,9 +750,6 @@ class JianszWebBridge:
         with self._lock:
             self._logs_history.append(line)
         self._push_event("log", {"line": line})
-        abnormal_markers = ("启动失败", "过早退出", "超时", "强制结束", "强制停止", "任务失败", "未发现目标", "【异常】")
-        if any(m in line for m in abnormal_markers):
-            self._record_abnormal_report(line)
 
     def _on_worker_status(self, status: str) -> None:
         self._status_text = str(status or "").strip() or "空闲待命"
@@ -721,10 +773,14 @@ class JianszWebBridge:
         if key:
             report = report_payload(record)
             with self._lock:
-                self._script_reports[key] = report
+                self._refresh_script_report_day()
+                if not report["time"]:
+                    report["time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                if report["result"] == "running" or report["time"][:10] == self._script_report_day.isoformat():
+                    self._script_reports[key] = report
+                    self._push_event("script_report", {"key": key, "report": report})
                 if report["result"] != "running" and self._run_mail_context:
                     self._run_mail_reports[key] = report
-                self._push_event("script_report", {"key": key, "report": report})
 
     def _on_worker_elapsed(self, elapsed: int) -> None:
         self._elapsed = int(elapsed)
@@ -789,23 +845,30 @@ class JianszWebBridge:
             finish_status = self._status_text
         if mail_context:
             settings, session_id, tasks = mail_context
-            body = summarize_outcomes(tasks, outcomes)
+            alert_tasks = [
+                (key, name) for key, name in tasks
+                if not (outcomes.get(key, {}).get("result") == "unknown"
+                        and outcomes[key].get("status", "").startswith("每日委托"))
+            ]
+            body = summarize_outcomes(alert_tasks, outcomes)
             if not body and stopped_or_error:
                 body = finish_status
             if body:
                 self._notify_by_mail(
                     settings, "简小松 · 本轮运行有异常",
                     f"运行编号：{session_id}\n调度结果：{finish_status}\n\n{body}",
-                    html_body=render_run_mail(tasks, outcomes, finish_status, session_id),
+                    html_body=render_run_mail(alert_tasks, outcomes, finish_status, session_id),
                 )
         if deferred_shutdown is not None:
             self._schedule_shutdown(deferred_shutdown)
         with self._lock:
             self._worker = None
             self._worker_thread = None
+            self._refresh_script_report_day()
             for key, report in self._script_reports.items():
                 if report["result"] == "running":
-                    report = {**report, "result": "unknown", "status": "本轮未留下最终结果。"}
+                    report = {**report, "result": "unknown", "status": "本轮未留下最终结果。",
+                              "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
                     self._script_reports[key] = report
                     self._push_event("script_report", {"key": key, "report": report})
             self._is_running = False
@@ -927,7 +990,7 @@ class JianszWebBridge:
                         self._update_items[row_idx] = item
                         self._push_event("update_item", self._serialize_update_item(row_idx, item))
                 ready = not self._update_stop.is_set() and all(
-                    item.kind == "unsupported" or item.status in {"已是最新", "本地版本较新"}
+                    item.kind == "unsupported" or item.status in READY_UPDATE_STATUSES
                     for _, item in selected
                 )
             except Exception as exc:
@@ -940,7 +1003,7 @@ class JianszWebBridge:
                 if mode == "prepare" and not ready:
                     checked_items = [self._update_items[index] for index, _ in selected]
                     lines = [f"{item.name}：{item.status}" for item in checked_items
-                             if item.kind != "unsupported" and item.status not in {"已是最新", "本地版本较新"}]
+                             if item.kind != "unsupported" and item.status not in READY_UPDATE_STATUSES]
                     body = "\n".join(lines) or "启动前检查被取消或未完成。"
                     description = "启动前检查被取消。" if self._update_stop.is_set() else "启动前检查未通过，任务队列未开始。"
                     self._notify_by_mail(
@@ -948,7 +1011,7 @@ class JianszWebBridge:
                         html_body=render_mail("本轮未启动", description, [
                             (item.name, "stopped" if item.status == "已取消" else "update", item.status, "")
                             for item in checked_items
-                            if item.kind != "unsupported" and item.status not in {"已是最新", "本地版本较新"}
+                            if item.kind != "unsupported" and item.status not in READY_UPDATE_STATUSES
                         ]),
                     )
                 with self._lock:
@@ -964,6 +1027,7 @@ class JianszWebBridge:
                     self._push_event("update_done", {
                         "mode": mode, "ready": ready,
                         "agentLaunch": agent_launch,
+                        "deferred": [item.name for _, item in selected if item.status == "沿用本地版本"],
                         "unsupported": [item.name for _, item in selected if item.kind == "unsupported"],
                     })
                     if agent_launch and ready:
@@ -1031,6 +1095,37 @@ class JianszWebBridge:
         except Exception:
             return False
 
+    def check_app_update(self) -> Dict[str, Any]:
+        return check_app_release()
+
+    def open_script_catalog(self, confirmed: bool = False, remember: bool = False) -> Dict[str, Any]:
+        preference = "skip_script_catalog_notice"
+        with self._lock:
+            if not self._config.extra_settings.get(preference):
+                now = time.monotonic()
+                if not confirmed:
+                    self._script_catalog_notice_ready_at = now + SCRIPT_CATALOG_NOTICE_SECONDS
+                    return {"noticeRequired": True, "waitSeconds": SCRIPT_CATALOG_NOTICE_SECONDS}
+                if self._script_catalog_notice_ready_at is None or now < self._script_catalog_notice_ready_at:
+                    return {"ok": False, "error": "请先阅读来源提示，并等待 7 秒。"}
+        try:
+            opened = webbrowser.open(SCRIPT_CATALOG_URL)
+        except (OSError, webbrowser.Error):
+            opened = False
+        if not opened:
+            return {"ok": False, "error": "无法打开默认浏览器，请稍后重试。"}
+        with self._lock:
+            self._script_catalog_notice_ready_at = None
+            if confirmed and remember:
+                previous = self._config.extra_settings
+                self._config.extra_settings = {**previous, preference: True}
+                try:
+                    self._config_manager.save(self._config)
+                except OSError:
+                    self._config.extra_settings = previous
+                    return {"ok": True, "warning": "已打开项目列表，但未能保存「不再提示」。"}
+        return {"ok": True}
+
     def open_external(self, target: str) -> bool:
         if target == "docs":
             doc = resolve_doc_file(self._base_dir, "index.html")
@@ -1044,6 +1139,10 @@ class JianszWebBridge:
         if target == "github":
             webbrowser.open(GITHUB_URL)
             return True
+        if target == "project":
+            return webbrowser.open(PROJECT_URL)
+        if target == "releases":
+            return webbrowser.open(RELEASES_URL)
         if target.startswith(("http://", "https://")):
             webbrowser.open(target)
             return True

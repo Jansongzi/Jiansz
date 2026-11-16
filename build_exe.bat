@@ -80,7 +80,6 @@ if errorlevel 1 goto BUILD_FAIL
 echo.
 echo [6/6] Copying release files...
 
-if exist "config.json" copy /Y "config.json" "dist\Jiansz\config.json" >nul
 if exist "README.md" copy /Y "README.md" "dist\Jiansz\README.md" >nul
 if exist "USER_GUIDE.md" copy /Y "USER_GUIDE.md" "dist\Jiansz\USER_GUIDE.md" >nul
 if exist "FAQ.md" copy /Y "FAQ.md" "dist\Jiansz\FAQ.md" >nul

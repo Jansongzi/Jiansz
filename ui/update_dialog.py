@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QHeaderView, QAbstractItemView, QTextEdit,
 )
 
-from core.updates import discover_items, check_item, update_item
+from core.updates import READY_UPDATE_STATUSES, discover_items, check_item, update_item
 from core.native_process import native_popen
 
 
@@ -143,7 +143,7 @@ class UpdateDialog(QDialog):
                         self.log_message.emit(f"{item.name}：{exc}")
                     self.item_changed.emit(row, item)
             ready = bool(selected) and not self.stop.is_set() and all(
-                item.status in {"已是最新", "本地版本较新"} for _, item in selected
+                item.status in READY_UPDATE_STATUSES for _, item in selected
             )
         except Exception as exc:
             self.log_message.emit(f"更新检查失败：{exc}")
