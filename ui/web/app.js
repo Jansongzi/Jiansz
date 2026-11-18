@@ -4,6 +4,8 @@
 (function () {
   "use strict";
 
+  const AUTO_START_DELAY_SECONDS = 5;
+
   const REPORT_LABELS = {
     success: "日志确认完成",
     failed: "执行失败",
@@ -78,12 +80,48 @@
     return `${String(m).padStart(2, "0")}:${String(r).padStart(2, "0")}`;
   }
 
+  const taskIcons = new Map();
+  let taskIconTimer;
+
+  function executableIconKey(task) {
+    return JSON.stringify([task.script_path.trim(), task.use_args ? (task.args || "").trim() : ""]);
+  }
+
+  function refreshTaskIcons() {
+    clearTimeout(taskIconTimer);
+    if (!state.api?.get_task_icons) return;
+    taskIconTimer = setTimeout(async () => {
+      const pending = new Map();
+      for (const task of state.config?.tasks || []) {
+        if (!task.script_path?.trim()) continue;
+        const key = executableIconKey(task);
+        if (taskIcons.has(key)) continue;
+        pending.set(key, { path: task.script_path.trim(), args: task.use_args ? (task.args || "").trim() : "" });
+      }
+      if (!pending.size) return;
+      const keys = Array.from(pending.keys());
+      keys.forEach((key) => taskIcons.set(key, ""));
+      try {
+        const icons = await state.api.get_task_icons(Array.from(pending.values()));
+        icons.forEach((icon, i) => taskIcons.set(keys[i], icon));
+        if (icons.some(Boolean)) renderTaskQueue(false);
+      } catch (_) {
+        keys.forEach((key) => taskIcons.delete(key));
+      }
+    }, 240);
+  }
+
   function guessGameIcon(task) {
+    const executable = task?.script_path?.trim() && taskIcons.get(executableIconKey(task));
+    if (executable) return executable;
     const text = `${task?.name || ""} ${task?.script_path || ""}`.toLowerCase();
     if (/鸣潮|wuwa|ok-ww/.test(text)) return "/assets/games/wuwa_app.png";
     if (/星穹|崩铁|hsr|march7th/.test(text)) return "/assets/games/hsr_app.png";
     if (/绝区零|zzz|onedragon/.test(text)) return "/assets/games/zzz_app.png";
     if (/原神|genshin|bettergi/.test(text)) return "/assets/games/genshin_app.png";
+    if (/maaend|终末地/.test(text)) return "/assets/games/maaend_app.png";
+    if (/\bmaa\b|明日方舟|maaassistantarknights/.test(text)) return "/assets/games/maa_app.png";
+    if (/\bm9a\b|重返未来/.test(text)) return "/assets/games/m9a_app.png";
     return null;
   }
 
@@ -107,6 +145,13 @@
     const clean = String(name || "TS").replace(/[^\w\u4e00-\u9fa5]/g, "");
     if (!clean) return "JS";
     return clean.slice(0, 2).toUpperCase();
+  }
+
+  function queueIconMarkup(task) {
+    const icon = guessGameIcon(task);
+    return icon
+      ? `<img class="q-icon" src="${icon}" alt="" />`
+      : `<div class="q-monogram">${escapeHtml(monogramText(task.name))}</div>`;
   }
 
   // -------------------- 页面导航与主题 --------------------
@@ -154,7 +199,7 @@
     grid.dataset.count = String(tasks.length);
     grid.dataset.overflow = tasks.length > 5 ? "true" : "false";
 
-    const counts = { success: 0, unknown: 0, failed: 0, pending: 0 };
+    const counts = { success: 0, unknown: 0, failed: 0, stopped: 0, pending: 0 };
     grid.innerHTML = tasks.map((task, idx) => {
       const rawName = String(task.name || "未命名任务").trim();
       const titleText = rawName.replace(/\.exe$/i, "") || rawName;
@@ -170,7 +215,8 @@
       const aura = guessCardAura(task);
       const result = report?.result || "empty";
       if (result === "success") counts.success += 1;
-      else if (result === "failed" || result === "stopped") counts.failed += 1;
+      else if (result === "failed") counts.failed += 1;
+      else if (result === "stopped") counts.stopped += 1;
       else if (result === "unknown") counts.unknown += 1;
       else counts.pending += 1;
 
@@ -239,7 +285,8 @@
         const pills = [];
         if (counts.success) pills.push(`<span class="summary-pill ok"><strong>${counts.success}</strong> 确认完成</span>`);
         if (counts.unknown) pills.push(`<span class="summary-pill unknown"><strong>${counts.unknown}</strong> 未确认</span>`);
-        if (counts.failed) pills.push(`<span class="summary-pill fail"><strong>${counts.failed}</strong> 失败/中断</span>`);
+        if (counts.failed) pills.push(`<span class="summary-pill fail"><strong>${counts.failed}</strong> 执行失败</span>`);
+        if (counts.stopped) pills.push(`<span class="summary-pill"><strong>${counts.stopped}</strong> 已停止</span>`);
         if (counts.pending) pills.push(`<span class="summary-pill"><strong>${counts.pending}</strong> 今日待执行</span>`);
         summaryEl.innerHTML = pills.join("");
       }
@@ -382,7 +429,7 @@
 
   // -------------------- 任务调度 Master-Detail & Drag --------------------
 
-  function renderTaskQueue() {
+  function renderTaskQueue(refreshDetail = true) {
     const listEl = $("taskQueueList");
     const countEl = $("tasksQueueCount");
     const tasks = state.config?.tasks || [];
@@ -403,15 +450,11 @@
 
     listEl.innerHTML = tasks
       .map((t, idx) => {
-        const icon = guessGameIcon(t);
-        const iconHtml = icon
-          ? `<img class="q-icon" src="${icon}" alt="" />`
-          : `<div class="q-monogram">${escapeHtml(monogramText(t.name))}</div>`;
         const subText = `#${t.order}`;
         return `
           <div class="queue-item ${idx === state.selectedTaskIdx ? "selected" : ""}" draggable="true" data-idx="${idx}">
             <span class="drag-grip" title="拖动调整顺序">⋮⋮</span>
-            ${iconHtml}
+            ${queueIconMarkup(t)}
             <div class="q-meta">
               <div class="q-name">${escapeHtml(t.name || "未命名任务")}</div>
               <div class="q-sub">${escapeHtml(subText)}</div>
@@ -424,8 +467,9 @@
       })
       .join("");
 
-    renderTaskDetail();
+    if (refreshDetail) renderTaskDetail();
     renderDashboardSummary();
+    refreshTaskIcons();
   }
 
   function renderTaskDetail() {
@@ -478,13 +522,16 @@
           $("fieldArgs").disabled = !t.use_args;
         }
         state.dirtyConfig = true;
-        if (prop === "name" || prop === "script_path" || prop === "timeout_minutes" || prop === "order") {
+        if (["name", "script_path", "use_args", "args"].includes(prop)) refreshTaskIcons();
+        if (["name", "script_path", "use_args", "args", "timeout_minutes", "order"].includes(prop)) {
           // 轻量同步队列项显示，避免重建导致输入失焦
           const item = document.querySelector(`.queue-item[data-idx="${state.selectedTaskIdx}"]`);
           if (item) {
             const nameEl = item.querySelector(".q-name");
             const subEl = item.querySelector(".q-sub");
             if (nameEl) nameEl.textContent = t.name || "未命名任务";
+            const icon = item.querySelector(".q-icon, .q-monogram");
+            if (icon) icon.outerHTML = queueIconMarkup(t);
             if (subEl) {
               subEl.textContent = `#${t.order}`;
             }
@@ -629,7 +676,7 @@
     const releases = $("btnAppReleases");
     button.disabled = true;
     releases.hidden = true;
-    status.textContent = "正在检查 Jiansz 更新…";
+    status.textContent = "正在检查简小松更新…";
     try {
       const result = await state.api.check_app_update();
       const messages = {
@@ -801,6 +848,7 @@
   // -------------------- 弹窗层：报告、更新、异常、关机 --------------------
 
   let scriptCatalogTimer;
+  let autoStartTimer;
 
   function openModal(id) {
     const el = $(id);
@@ -999,9 +1047,41 @@
     showToast(res.message || "已取消自动关机", "ok");
   }
 
+  function cancelAutoStartCountdown() {
+    const dialog = $("autoStartDialog");
+    if (!dialog.open) return false;
+    clearInterval(autoStartTimer);
+    dialog.close();
+    return true;
+  }
+
+  function showAutoStartCountdown() {
+    const dialog = $("autoStartDialog");
+    const ring = $("autoStartRing");
+    const seconds = $("autoStartSeconds");
+    const duration = AUTO_START_DELAY_SECONDS * 1000;
+    const deadline = performance.now() + duration;
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    const tick = () => {
+      const remaining = Math.max(0, deadline - performance.now());
+      const wholeSeconds = Math.ceil(remaining / 1000);
+      const ringTime = reducedMotion ? wholeSeconds * 1000 : remaining;
+      ring.style.setProperty("--auto-start-progress", `${ringTime / duration * 100}%`);
+      const label = `${wholeSeconds} 秒`;
+      if (seconds.textContent !== label) seconds.textContent = label;
+      if (!remaining) startTasksFlow();
+    };
+
+    dialog.showModal();
+    autoStartTimer = setInterval(tick, 50);
+    tick();
+  }
+
   // -------------------- 任务启动流程 --------------------
 
   async function startTasksFlow(skipUpdates = false) {
+    cancelAutoStartCountdown();
     if (!state.api || !state.config) return;
     if (state.runner.isRunning) {
       showToast("任务已经在运行中");
@@ -1040,6 +1120,7 @@
         break;
       case "runner":
         state.runner = { ...state.runner, ...payload };
+        if (state.runner.isRunning) cancelAutoStartCountdown();
         renderRunnerState();
         break;
       case "toast":
@@ -1052,6 +1133,7 @@
         }
         break;
       case "shutdown_warning":
+        cancelAutoStartCountdown();
         showShutdownWarningModal(payload?.seconds, payload?.deadline);
         break;
       case "update_item":
@@ -1061,6 +1143,7 @@
         }
         break;
       case "update_busy":
+        if (payload?.busy) cancelAutoStartCountdown();
         if (payload?.agentLaunch) {
           state.updateMode = "prepare";
           state.updateCanceling = false;
@@ -1100,22 +1183,33 @@
         }
         break;
       case "update_done":
+        state.updateCanceling = false;
         setUpdateBusy(false);
+        if (payload?.canceled) {
+          const message = "已取消更新，下载进度已保留";
+          showUpdateProgress(null, {phase: message}, false);
+          $("updateModalHint").textContent = message;
+          break;
+        }
         const deferred = payload?.deferred || [];
-        const deferredMessage = deferred.length ? `${deferred.join("、")}更新未完成，沿用本地版本` : "";
-        showUpdateProgress(null, {phase: state.updateCanceling ? "已取消，下载进度已保留" : (deferredMessage || (payload?.ready ? "全部就绪" : "检查 / 更新已结束")),
+        const inAppUpdates = payload?.inAppUpdates || [];
+        const updateMessages = [
+          deferred.length ? `${deferred.join("、")}更新未完成，沿用本地版本` : "",
+          inAppUpdates.length ? `发现 ${inAppUpdates.join("、")}，请在 MAA 内更新` : "",
+        ].filter(Boolean).join("；");
+        showUpdateProgress(null, {phase: updateMessages || (payload?.ready ? "全部就绪" : "检查 / 更新已结束"),
                                  ...(payload?.ready ? {percent:100} : {})}, false);
         if (payload?.mode === "prepare") {
           if (payload.ready) {
             closeModal("updateModal");
             const skipped = payload.unsupported || [];
-            showToast(deferredMessage || (skipped.length ? `已完成可用的版本检查，未适配：${skipped.join("、")}` : "脚本更新检查完成，开始执行任务"), "ok");
+            showToast(updateMessages || (skipped.length ? `已完成可用的版本检查，未适配：${skipped.join("、")}` : "脚本更新检查完成，开始执行任务"), "ok");
             if (!payload.agentLaunch) startTasksFlow(true);
           } else {
             $("updateModalHint").textContent = "脚本未全部就绪，任务尚未启动。请查看原因后点击“重试检查并更新”。";
           }
         } else {
-          showToast(state.updateCanceling ? "已取消更新，已下载部分保留" : (deferredMessage || (payload?.ready ? "脚本检查 / 更新已完成" : "检查 / 更新结束，请查看状态和日志")), payload?.ready ? "ok" : "error");
+          showToast(updateMessages || (payload?.ready ? "脚本检查 / 更新已完成" : "检查 / 更新结束，请查看状态和日志"), payload?.ready ? "ok" : "error");
         }
         break;
       default:
@@ -1428,6 +1522,12 @@
     $("btnAbnormalOpenLogs")?.addEventListener("click", () => state.api?.open_folder("logs"));
     $("btnCancelShutdownModal")?.addEventListener("click", cancelShutdownAction);
 
+    $("btnCancelAutoStart").addEventListener("click", cancelAutoStartCountdown);
+    $("autoStartDialog").addEventListener("cancel", (e) => {
+      e.preventDefault();
+      cancelAutoStartCountdown();
+    });
+
     // 快捷键
     window.addEventListener("keydown", (e) => {
       if (e.key === "F5") {
@@ -1439,14 +1539,14 @@
       } else if (e.key === "F7") {
         e.preventDefault();
         state.api?.pause_tasks();
-      } else if (e.key === "F8" && e.ctrlKey && e.altKey) {
-        e.preventDefault();
-        state.api?.emergency_stop_tasks();
       } else if (e.key === "F8") {
         e.preventDefault();
-        state.api?.stop_tasks();
+        if (cancelAutoStartCountdown()) return;
+        if (e.ctrlKey && e.altKey) state.api?.emergency_stop_tasks();
+        else state.api?.stop_tasks();
       } else if ((e.key === "q" || e.key === "Q") && e.ctrlKey) {
         e.preventDefault();
+        cancelAutoStartCountdown();
         state.api?.win_close();
       }
     });
@@ -1510,10 +1610,8 @@
         showAbnormalModal(boot.abnormalReport);
       }
 
-      if (boot.autoStartOnOpen && !state.runner.isRunning) {
-        setTimeout(() => {
-          if (!state.runner.isRunning) startTasksFlow(false);
-        }, 1500);
+      if (boot.autoStartOnOpen && !state.runner.isRunning && enabledTasks().length) {
+        showAutoStartCountdown();
       }
 
       setInterval(pumpBackendEvents, 220);

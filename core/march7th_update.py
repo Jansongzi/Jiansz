@@ -44,7 +44,7 @@ def install_lock(root):
         try:
             msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
         except OSError as exc:
-            raise UpdateError("另一个 Jiansz 正在处理三月七更新。") from exc
+            raise UpdateError("另一个简小松实例正在处理三月七更新。") from exc
         yield
 
 

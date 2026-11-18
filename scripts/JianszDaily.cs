@@ -2,11 +2,15 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Xml;
+
+[assembly: AssemblyTitle("简小松日常启动器")]
+[assembly: AssemblyProduct("简小松")]
 
 internal static class JianszDaily
 {
@@ -30,13 +34,12 @@ internal static class JianszDaily
             string reply = Send(name, request, 1200);
             if (reply == null && !statusOnly)
             {
-                ValidateScheduledTask(directory);
-                RunTaskScheduler("/Run /TN \"" + TaskName + "\"");
+                StartAssistant(directory);
                 // The scheduled action already passes --start. A second start request could
                 // begin another round if the first finishes before this client reconnects.
                 reply = Send(name, "status\n", 20000);
                 if (reply == null)
-                    throw new IOException("Windows 已接受计划任务启动请求，但暂未连接到简小松。请用 --status 查询，避免重复启动。");
+                    throw new IOException("已请求启动简小松，但尚未连接到运行实例。请查看窗口或用 --status 查询，避免重复启动。");
             }
             Console.WriteLine(reply ?? "{\"status\":\"offline\",\"message\":\"未连接到简小松。\"}");
             return reply != null && Regex.IsMatch(reply, "\"status\"\\s*:\\s*\"error\"") ? 1 : 0;
@@ -48,6 +51,35 @@ internal static class JianszDaily
             Console.WriteLine("{\"status\":\"error\",\"message\":\"" + message + "\"}");
             return 1;
         }
+    }
+
+    private static void StartAssistant(string directory)
+    {
+        bool validTask = false;
+        try
+        {
+            ValidateScheduledTask(directory);
+            validTask = true;
+        }
+        catch (IOException) { }
+        catch (XmlException) { }
+        if (validTask)
+        {
+            RunTaskScheduler("/Run /TN \"" + TaskName + "\"");
+            return;
+        }
+
+        string executable = Path.Combine(directory, "Jiansz.exe");
+        if (!File.Exists(executable))
+            throw new FileNotFoundException("同一目录下未找到 Jiansz.exe，请完整解压后重试。");
+        using (Process.Start(new ProcessStartInfo
+        {
+            FileName = executable,
+            Arguments = "--start",
+            WorkingDirectory = directory,
+            UseShellExecute = true,
+            Verb = "runas",
+        })) { }
     }
 
     private static void ValidateScheduledTask(string directory)

@@ -8,7 +8,7 @@ import unittest
 import threading
 import time
 from pathlib import Path
-from unittest.mock import patch, Mock
+from unittest.mock import ANY, patch, Mock
 
 from core import CONFIG_FILE_NAME, TaskConfig
 from core.updates import UpdateCancelled
@@ -36,11 +36,11 @@ class WebBridgeTests(unittest.TestCase):
             bridge._run_mail_context = ({"enabled": True}, "test-session", [("a", "原神"), ("b", "绝区零")])
             bridge._on_script_report({"task_id": "a", "result": "unknown", "status": "游戏已关闭"})
             with patch.object(bridge, "_notify_by_mail") as notify:
-                bridge._on_worker_finished(False)
+                bridge._on_worker_finished(False, False)
                 self.assertIn("test-session", notify.call_args.args[2])
                 self.assertIn("原神：结果未确认", notify.call_args.args[2])
                 self.assertIn("绝区零：本轮无执行结果", notify.call_args.args[2])
-                bridge._on_worker_finished(False)
+                bridge._on_worker_finished(False, False)
                 notify.assert_called_once()
 
     def test_successful_round_is_silent(self):
@@ -49,8 +49,40 @@ class WebBridgeTests(unittest.TestCase):
             bridge._run_mail_context = ({"enabled": True}, "test-session", [("a", "原神")])
             bridge._on_script_report({"task_id": "a", "result": "success", "status": "日志确认完成"})
             with patch.object(bridge, "_notify_by_mail") as notify:
-                bridge._on_worker_finished(False)
+                bridge._on_worker_finished(False, False)
                 notify.assert_not_called()
+
+    def test_manual_stop_mail_only_reports_prior_failures(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = self._configured_bridge(Path(tmp))
+            tasks = [("done", "先前任务"), ("active", "当前任务"), ("later", "后续任务")]
+            for result in ("success", "failed"):
+                with self.subTest(result=result):
+                    bridge._run_mail_context = ({"enabled": True}, "test-session", tasks)
+                    bridge._on_script_report({"task_id": "done", "result": result, "status": "实际结果"})
+                    bridge._on_script_report({"task_id": "active", "result": "stopped", "status": "已停止"})
+                    with patch.object(bridge, "_notify_by_mail") as notify:
+                        bridge._on_worker_finished(True, True)
+                    self.assertEqual(bridge._status_text, "已停止")
+                    self.assertIsNone(bridge._read_abnormal_report())
+                    if result == "success":
+                        notify.assert_not_called()
+                    else:
+                        notify.assert_called_once()
+                        body = notify.call_args.args[2]
+                        self.assertIn("先前任务：失败", body)
+                        self.assertNotIn("当前任务", body)
+                        self.assertNotIn("后续任务", body)
+
+    def test_automatic_stop_still_notifies(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = self._configured_bridge(Path(tmp))
+            bridge._status_text = "已停止"
+            bridge._run_mail_context = ({"enabled": True}, "test-session", [("task", "实际失败")])
+            bridge._on_script_report({"task_id": "task", "result": "failed", "status": "超时"})
+            with patch.object(bridge, "_notify_by_mail") as notify:
+                bridge._on_worker_finished(True, False)
+            self.assertIn("实际失败：失败（超时）", notify.call_args.args[2])
 
     @staticmethod
     def _configured_bridge(base):
@@ -108,14 +140,95 @@ class WebBridgeTests(unittest.TestCase):
                 if kind=="update_done":finished.set()
             def check(item,stop,log):
                 item.status="有更新";item.latest="2.0";return item
-            with patch.object(bridge,"_push_event",side_effect=capture), \
-                 patch("ui.web_backend.check_item",side_effect=check), \
-                 patch("ui.web_backend.update_item",side_effect=UpdateCancelled("cancel")):
+            def cancel_update(*args, **kwargs):
+                bridge.updates_stop()
+                raise UpdateCancelled("cancel")
+            with patch.object(bridge, "_push_event", side_effect=capture), \
+                 patch("ui.web_backend.check_item", side_effect=check), \
+                 patch("ui.web_backend.update_item", side_effect=cancel_update), \
+                 patch.object(bridge, "_notify_by_mail") as notify:
                 bridge.updates_start("prepare")
                 self.assertTrue(finished.wait(3))
-            self.assertEqual(bridge._update_items[0].status,"已取消")
+            notify.assert_not_called()
+            payload = next(event["payload"] for event in bridge.drain_events() if event["type"] == "update_done")
+            self.assertTrue(payload["canceled"])
+            self.assertEqual(bridge._update_items[0].status, "已取消")
             self.assertIsNone(bridge._prepared_update_ticket)
             self.assertTrue(bridge.start_tasks({"skip_updates":True}).get("needPrepareUpdate"))
+
+    def test_prepare_checks_enabled_maa_and_reports_updates_handled_in_maa(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bridge = self._configured_bridge(root)
+            executable = root / "MAA.exe"
+            executable.touch()
+            bridge._config.tasks = [TaskConfig.from_dict(
+                {"name": "明日方舟", "enabled": True, "script_path": str(executable)}, fallback_order=1,
+            )]
+            finished = threading.Event()
+            push = bridge._push_event
+
+            def capture(kind, payload):
+                push(kind, payload)
+                if kind == "update_done":
+                    finished.set()
+
+            for latest, status, notices in (
+                ("v6.22.0", "已是最新", []),
+                ("v6.22.1", "请在 MAA 内更新", ["MAA v6.22.1"]),
+            ):
+                with self.subTest(latest=latest):
+                    finished.clear()
+                    with patch.object(bridge, "_push_event", side_effect=capture), \
+                         patch("core.updates.local_version", return_value="6.22.0.0") as local, \
+                         patch("core.updates._release_version", return_value=latest) as release, \
+                         patch("ui.web_backend.update_item") as update:
+                        self.assertTrue(bridge.updates_start("prepare")["ok"])
+                        self.assertTrue(finished.wait(3))
+                    item, = bridge._update_items
+                    self.assertEqual((item.current, item.latest, item.status), ("6.22.0.0", latest, status))
+                    local.assert_called_once_with(item)
+                    release.assert_called_once_with("MaaAssistantArknights/MaaAssistantArknights", stop=bridge._update_stop, log=ANY)
+                    update.assert_not_called()
+                    payload = next(event["payload"] for event in bridge.drain_events() if event["type"] == "update_done")
+                    self.assertTrue(payload["ready"])
+                    self.assertEqual(payload["unsupported"], [])
+                    self.assertEqual(payload["inAppUpdates"], notices)
+
+    def test_offline_prepare_uses_verified_local_tools_without_abnormal_mail(self):
+        from core.updates import ReleaseQueryUnavailable
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bridge = self._configured_bridge(root)
+            executables = [root / "BetterGI.exe", root / "OneDragon-RuntimeLauncher.exe"]
+            for executable in executables:
+                executable.touch()
+            (root / ".runtime").mkdir()
+            (root / ".runtime/python312.dll").touch()
+            bridge._config.tasks = [
+                TaskConfig.from_dict({"name": file.stem, "enabled": True, "script_path": str(file)}, index)
+                for index, file in enumerate(executables, 1)
+            ]
+            finished = threading.Event()
+            push = bridge._push_event
+
+            def capture(kind, payload):
+                push(kind, payload)
+                if kind == "update_done":
+                    finished.set()
+
+            versions = {"bettergi": "0.67.0", "onedragon": "v2.6.1"}
+            with patch.object(bridge, "_push_event", side_effect=capture), \
+                 patch("core.updates.local_version", side_effect=lambda item: versions[item.key]), \
+                 patch("core.updates._release_version", side_effect=ReleaseQueryUnavailable("offline")), \
+                 patch.object(bridge, "_notify_by_mail") as notify:
+                self.assertTrue(bridge.updates_start("prepare")["ok"])
+                self.assertTrue(finished.wait(3))
+            payload = next(event["payload"] for event in bridge.drain_events() if event["type"] == "update_done")
+            self.assertTrue(payload["ready"])
+            self.assertEqual(len(payload["deferred"]), 2)
+            self.assertIsNotNone(bridge._prepared_update_ticket)
+            notify.assert_not_called()
 
     def test_agent_start_updates_then_dispatches_saved_queue_once(self):
         with tempfile.TemporaryDirectory() as tmp:

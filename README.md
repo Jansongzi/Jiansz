@@ -1,4 +1,4 @@
-# 简小松（Jiansz）
+# 简小松
 
 Windows 上的二游脚本调度助手。把已经能独立运行的工具加入队列，由简小松按顺序启动、判断完成、记录结果和处理超时。游戏内操作由各自的第三方工具执行。
 
@@ -6,12 +6,14 @@ Windows 上的二游脚本调度助手。把已经能独立运行的工具加入
 
 ## 快速开始
 
-从 [GitHub Releases](https://github.com/Jansongzi/Jiansz/releases/latest) 下载 Windows x64 压缩包，完整解压后运行 `Jiansz.exe`。
+从 [GitHub Releases](https://github.com/Jansongzi/Jiansz/releases/latest) 下载 Windows x64 压缩包，完整解压到可写目录后运行 `Jiansz.exe`。需要 [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/#download)。
 
 1. 在 Windows 上打开 `Jiansz.exe`，进入 **任务调度 → + 添加**。
 2. 填写任务名称和脚本或程序路径。需要参数时打开 **启用参数**，并选择完成判断方式和最大运行时间。
 3. 点击 **保存配置**。先启用一项验证它的启动和完成判断，再添加其他任务。
 4. 回到 **启动中心**，点击 **开始执行一条龙**。在启动中心查看本轮进度和脚本简报，在运行日志中排查异常。
+
+任务路径可以相对于简小松安装目录填写。运行 `.py` 任务需要另外安装 Python 3，运行 `.ps1` 任务使用 Windows PowerShell，并遵循设备组策略。
 
 ![任务调度，左侧为队列，右侧为运行参数和完成判断](docs/images/tasks.jpg)
 

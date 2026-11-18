@@ -4,6 +4,7 @@ from __future__ import annotations
 import ctypes
 from ctypes import wintypes
 from dataclasses import dataclass
+from http.client import HTTPException
 import json
 import hashlib
 import os
@@ -12,7 +13,8 @@ import re
 import subprocess
 import time
 import zipfile
-from urllib.parse import urlparse
+from urllib.error import HTTPError
+from urllib.parse import urlparse, unquote
 from urllib.request import Request, urlopen
 
 from packaging.version import Version, InvalidVersion
@@ -46,9 +48,11 @@ SCRIPT_INFO = {
     "onedragon-runtimelauncher.exe": ("onedragon", "绝区零一条龙", "OneDragon-Anything/ZenlessZoneZero-OneDragon"),
     "onedragon-launcher.exe": ("onedragon", "绝区零一条龙", "OneDragon-Anything/ZenlessZoneZero-OneDragon"),
     "bettergi.exe": ("bettergi", "BetterGI", "babalae/better-genshin-impact"),
+    "maa.exe": ("maa", "MAA", "MaaAssistantArknights/MaaAssistantArknights"),
 }
 
-READY_UPDATE_STATUSES = {"已是最新", "本地版本较新", "沿用本地版本"}
+MAA_UPDATE_IN_APP = "请在 MAA 内更新"
+READY_UPDATE_STATUSES = {"已是最新", "本地版本较新", "沿用本地版本", MAA_UPDATE_IN_APP}
 
 
 def run_output(command: list[str], cwd: Path, timeout: int = 30) -> str:
@@ -80,7 +84,7 @@ def discover_items(tasks) -> list[UpdateItem]:
         info = SCRIPT_INFO.get(path.name.lower())
         if info is None:
             result.append(UpdateItem(f"unknown:{path}", task.name, "unsupported", path,
-                                     status="尚未适配", detail="当前支持 OK-WW、三月七、绝区零一条龙和 BetterGI。"))
+                                     status="尚未适配", detail="当前支持 OK-WW、三月七、绝区零一条龙、BetterGI 和 MAA。"))
             continue
         key, name, repository = info
         identity = (key, os.path.normcase(str(path.resolve())))
@@ -133,25 +137,76 @@ def _stable_version(value: str) -> Version:
         raise UpdateError(f"无法识别版本号 {value!r}。") from exc
 
 
-def _release_version(repository: str) -> str:
-    request = Request(f"https://github.com/{repository}/releases/latest",
-                      headers={"User-Agent": f"Jiansz-update-check/{APP_VERSION}"})
-    for attempt in range(2):
-        try:
-            with urlopen(request, timeout=15) as response:
-                final = urlparse(response.url)
-            break
-        except OSError:
-            if attempt:
-                raise UpdateError("连接上游发布页失败，已重试，请检查网络后再次检查。")
+class ReleaseQueryUnavailable(UpdateError):
+    """官方版本查询的网络通道均不可用。"""
+
+
+def _release_tag(repository: str, final_url: str) -> str:
+    final = urlparse(final_url)
     prefix = f"/{repository}/releases/tag/"
     if final.hostname != "github.com" or not final.path.lower().startswith(prefix.lower()):
         raise UpdateError("上游发布地址未返回稳定版本。")
-    tag = final.path[len(prefix):]
+    tag = unquote(final.path[len(prefix):])
     parsed = _stable_version(tag)
     if parsed.is_prerelease or parsed.is_devrelease:
         raise UpdateError("上游最新发布仍是测试版本，请在原工具中选择更新通道。")
     return tag
+
+
+def _curl_release_url(url, stop):
+    curl = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32/curl.exe"
+    command = [str(curl), "--fail", "--silent", "--location", "--head",
+               "--proto", "=https", "--proto-redir", "=https", "--max-redirs", "5",
+               "--connect-timeout", "5", "--max-time", "10",
+               "--output", os.devnull, "--write-out", "%{url_effective}", url]
+    with native_popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                      creationflags=subprocess.CREATE_NO_WINDOW) as process:
+        while True:
+            if stop is not None and stop.is_set():
+                process.kill()
+                process.communicate()
+                raise UpdateCancelled("已取消版本检查。")
+            try:
+                output, _ = process.communicate(timeout=.2)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+        if process.returncode:
+            raise OSError(f"curl 退出码 {process.returncode}")
+    return output.decode("utf-8", errors="replace").strip()
+
+
+def _release_version(repository: str, *, stop=None, log=None) -> str:
+    log = log or (lambda _: None)
+    url = f"https://github.com/{repository}/releases/latest"
+    user_agent = f"Jiansz-update-check/{APP_VERSION}"
+    failures = []
+    for channel in ("发布页", "Windows curl", "GitHub API"):
+        if stop is not None and stop.is_set():
+            raise UpdateCancelled("已取消版本检查。")
+        try:
+            if channel == "Windows curl":
+                final_url = _curl_release_url(url, stop)
+            else:
+                endpoint = f"https://api.github.com/repos/{repository}/releases/latest" if channel == "GitHub API" else url
+                request = Request(endpoint, headers={"User-Agent": user_agent})
+                with urlopen(request, timeout=7) as response:
+                    final_url = response.url
+                    if channel == "GitHub API":
+                        data = json.loads(response.read(1024 * 1024).decode("utf-8"))
+                        if not isinstance(data, dict) or data.get("draft") or data.get("prerelease"):
+                            raise UpdateError("上游版本接口未返回正式发布。")
+                        final_url = data.get("html_url", "")
+            if stop is not None and stop.is_set():
+                raise UpdateCancelled("已取消版本检查。")
+            return _release_tag(repository, final_url)
+        except (OSError, HTTPException) as exc:
+            reason = f"HTTP {exc.code}" if isinstance(exc, HTTPError) else type(exc).__name__
+            if isinstance(exc, OSError) and str(exc).startswith("curl 退出码"):
+                reason = str(exc)
+            failures.append(f"{channel} {reason}")
+            log(f"{repository}：{channel}查询失败（{reason}）。")
+    raise ReleaseQueryUnavailable("官方版本查询暂不可用（" + "；".join(failures) + "）。")
 
 
 def _remote_tags(remote: str) -> list[str]:
@@ -174,6 +229,7 @@ def check_item(item: UpdateItem, stop, log) -> UpdateItem:
         if item.kind == "unsupported":
             item.status = "尚未适配"
             return item
+        item.current = ""
         item.latest = ""
         item.detail = ""
         item.progress = None
@@ -189,6 +245,7 @@ def check_item(item: UpdateItem, stop, log) -> UpdateItem:
         if not item.executable.is_file():
             raise UpdateError("程序路径无效，请设置正确路径。")
         item.current = local_version(item)
+        _stable_version(item.current)
         if item.key == "okww":
             data = json.loads((item.executable.parent / "data/apps/ok-ww/app.json").read_text("utf-8-sig"))
             profile = next(p for p in data["profiles"] if p["name"] == data["current_profile"])
@@ -209,25 +266,37 @@ def check_item(item: UpdateItem, stop, log) -> UpdateItem:
                 raise UpdateError("当前更新源没有返回可识别的稳定版本。")
             item.latest = max(stable)[1]
         else:
-            try:
-                item.latest = _release_version(item.repository)
-            except UpdateError as exc:
-                if item.key != "march7th" or not str(exc).startswith("连接上游发布页失败"):
-                    raise
-                return _defer_march7th(item, item.current, exc, stop, log)
+            item.latest = _release_version(item.repository, stop=stop, log=log)
         current = _stable_version(item.current)
         latest = _stable_version(item.latest)
-        if current < latest:
+        if current < latest and item.key == "maa":
+            item.status = MAA_UPDATE_IN_APP
+            item.detail = f"发现 MAA 正式版 {item.latest}，可在 MAA 的「设置 → 更新设置」中下载和安装。"
+        elif current < latest:
             item.status = "有更新"
         elif current == latest:
             item.status = "已是最新"
         else:
             item.status = "本地版本较新"
-        item.detail = ""
+    except UpdateCancelled as exc:
+        item.status = "已取消"
+        item.detail = str(exc)
+    except (ReleaseQueryUnavailable, OSError, HTTPException) as exc:
+        if item.current and not item.latest:
+            try:
+                return _defer_version_check(item, exc, stop, log)
+            except UpdateCancelled as canceled:
+                item.status, item.detail = "已取消", str(canceled)
+            except (UpdateError, OSError) as invalid:
+                item.status, item.detail = "检查失败", str(invalid)
+        else:
+            item.status = "检查失败"
+            item.detail = f"本地版本读取失败（{type(exc).__name__}）。"
     except Exception as exc:
         item.status = "检查失败"
-        item.detail = str(exc) if isinstance(exc, UpdateError) else "查询失败，请检查路径、网络和原工具日志。"
-    log(f"{item.name}：{item.status}，本地 {item.current or '未知'}，上游 {item.latest or '未知'}。")
+        item.detail = str(exc) if isinstance(exc, UpdateError) else f"查询失败（{type(exc).__name__}），请检查路径和原工具日志。"
+    log(f"{item.name}：{item.status}，本地 {item.current or '未知'}，上游 {item.latest or '未知'}。"
+        + (f" {item.detail}" if item.detail else ""))
     return item
 
 
@@ -376,6 +445,28 @@ def _update_onedragon(item: UpdateItem, stop, log, progress=None) -> UpdateItem:
     report_progress(progress, "更新完成", completed=1, total=1)
     return item
 
+
+
+def _defer_version_check(item, error, stop, log):
+    if stop.is_set():
+        raise UpdateCancelled("已取消版本检查。")
+    if item.key == "march7th":
+        return _defer_march7th(item, item.current, error, stop, log)
+    root = item.executable.parent
+    if (not item.executable.is_file() or (root / ".jiansz-update.json").exists()
+            or local_version(item) != item.current):
+        raise UpdateError("本地版本无法复核，已暂停队列。") from error
+    _stable_version(item.current)
+    if (item.executable.name.lower() == "onedragon-runtimelauncher.exe"
+            and not list((root / ".runtime").glob("python3[0-9]*.dll"))):
+        raise UpdateError("一条龙配套运行时缺失，已暂停队列。") from error
+    if stop.is_set():
+        raise UpdateCancelled("已取消版本检查。")
+    item.status = "沿用本地版本"
+    reason = str(error) if isinstance(error, UpdateError) else f"版本查询网络错误（{type(error).__name__}）。"
+    item.detail = f"{reason} 已重新核对本地版本 {item.current}，本轮继续，下次启动重新检查。"
+    log(f"{item.name}：{item.detail}")
+    return item
 
 def _defer_march7th(item, previous, error, stop, log, progress=None):
     root = item.executable.parent

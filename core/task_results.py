@@ -14,6 +14,7 @@ _DECODERS = {
     "march7th launcher.exe": ("march7th", "logs/runs/*.json"),
     "m7a.exe": ("march7th", "logs/runs/*.json"),
     "bettergi.exe": ("bettergi", "log/better-genshin-impact*.log"),
+    "maa.exe": ("maa", "debug/asst*.log*"),
     "onedragon-runtimelauncher.exe": ("onedragon", ".log/log.txt*"),
     "onedragon-launcher.exe": ("onedragon", ".log/log.txt*"),
 }
@@ -110,6 +111,8 @@ class TaskLogProbe:
         lines = self._new_lines()
         if self.kind == "bettergi":
             return _bettergi(lines, pids)
+        if self.kind == "maa":
+            return _maa(lines, pids)
         if self.kind == "okww":
             return _okww(lines, pids)
         return _onedragon(self._onedragon_lines(lines))
@@ -237,6 +240,52 @@ def daily_result(completed=None, claimed=None, source="", *, pending=False):
     return TaskResult("unknown", f"{completion} · {reward}", source, pending)
 
 
+_MAA_CALLBACK = re.compile(
+    r"^\[[^\]]+\]\[[^\]]+\]\[Px(\d+)\]\[[^\]]+\]\s+"
+    r"Assistant::append_callback \| (TaskChainStart|SubTaskCompleted|TaskChainCompleted|AllTasksCompleted) (\{.*\})$"
+)
+
+
+def _maa(lines, pids):
+    daily_clicks = set()
+    daily_claims = set()
+    source = ""
+    for filename, line in lines:
+        match = _MAA_CALLBACK.match(line)
+        if not match or int(match[1]) not in pids:
+            continue
+        _, callback, body = match.groups()
+        try:
+            data = json.loads(body)
+        except ValueError:
+            continue
+        task_id = data.get("taskid")
+        uuid = data.get("uuid")
+        if not isinstance(task_id, int) or not isinstance(uuid, str):
+            continue
+        owner = (int(match[1]), uuid)
+        key = (*owner, task_id)
+        if callback == "AllTasksCompleted":
+            source = filename
+            finished = data.get("finished_tasks")
+            if isinstance(finished, list) and any(
+                (*owner, completed_id) in daily_claims for completed_id in finished if isinstance(completed_id, int)
+            ):
+                return daily_result(True, True, filename)
+        elif data.get("taskchain") == "Award":
+            if callback == "TaskChainStart":
+                daily_clicks.discard(key)
+                daily_claims.discard(key)
+            elif callback == "SubTaskCompleted":
+                details = data.get("details")
+                if (isinstance(details, dict) and details.get("task") == "ReceiveAward"
+                        and data.get("pre_task") in {"Award", "DailyTask"}):
+                    daily_clicks.add(key)
+            elif key in daily_clicks:
+                daily_claims.add(key)
+    return daily_result(source=source, pending=not source)
+
+
 def _bettergi(lines, pids):
     header = re.compile(r"^\[[\d:.]+\] \[([A-Z]+)\] \[[^\]]*:P(\d+):[^\]]+\]\s*(.*)")
     owner = False
@@ -274,9 +323,17 @@ def _okww_session_lines(lines, pids):
 def _okww(lines, pids):
     completed = claimed = None
     source = ""
+    reward_clicked = False
     for filename, line in _okww_session_lines(lines, pids):
         if not re.search(r"TaskExecutor (?:MultiAccount)?DailyTask:", line):
             continue
+        if "info_set current task claim daily" in line:
+            reward_clicked = False
+        if re.search(r"通过坐标领取每日奖励|claim daily reward via\s+coordinate", line):
+            reward_clicked = True
+        # claim_mail 只在 claim_daily 的领取操作和返回主界面均成功后进入。
+        if reward_clicked and "info_set current task claim mail" in line:
+            claimed, source = True, filename
         if re.search(r"每日任务已完成|Daily Task Completed|total daily points 100\b", line):
             completed, source = True, filename
         if re.search(r"每日奖励(?:已领取|领取成功)|已领取每日奖励|Daily rewards? (?:already )?claimed", line, re.I):

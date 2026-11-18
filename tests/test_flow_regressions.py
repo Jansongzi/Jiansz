@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 from threading import Event, Thread
 import unittest
@@ -51,6 +52,31 @@ class FlowRegressions(unittest.TestCase):
         self.assertTrue(worker.had_task_error)
         self.assertIn("异常退出", worker.stats_manager.records[0]["status"])
 
+    def test_stop_during_process_poll_does_not_treat_termination_as_a_failure(self):
+        path = self.root / "test.exe"
+        path.touch()
+        config = task(path, timeout_minutes=0)
+        for confirmed in (True, False):
+            with self.subTest(already_confirmed=confirmed):
+                worker = self.worker(config)
+
+                def poll():
+                    worker.request_stop(cleanup=False)
+                    return 1
+
+                process = Mock(pid=777, poll=poll)
+                with patch.object(worker, "_start_process", return_value=process), \
+                     patch.object(worker, "_track_children"), \
+                     patch.object(worker, "_cleanup_processes_for_tasks"), \
+                     patch.object(worker, "_confirm_launch_success",
+                                  wraps=None if confirmed else worker._confirm_launch_success) as confirm:
+                    if confirmed:
+                        confirm.return_value = True
+                    result = worker._run_one_task(config)
+                self.assertEqual(result, "stop_requested")
+                self.assertFalse(worker.abnormal_events)
+                self.assertEqual(worker.stats_manager.records[0]["result"], "stopped")
+
     def test_cleanup_uses_only_registered_processes(self):
         config = task(self.root / "fake.exe", process_keywords=["unrelated"])
         worker = self.worker(config)
@@ -69,6 +95,23 @@ class FlowRegressions(unittest.TestCase):
             self.assertEqual(worker._active_time() - started, 10)
             worker.request_resume()
             self.assertEqual(worker._active_time() - started, 20)
+
+    def test_batch_from_a_path_with_spaces(self):
+        folder = self.root / "portable & test"
+        folder.mkdir()
+        script = folder / "run daily.cmd"
+        script.write_bytes(b"@echo off\r\n>result.txt echo %~1\r\n")
+        config = task(script, use_args=True, args='"argument with spaces"')
+        command = self.worker(config)._build_command(script, config)
+        subprocess.run(command, cwd=folder, check=True, timeout=10, capture_output=True)
+        self.assertEqual((folder / "result.txt").read_text().strip(), "argument with spaces")
+
+    def test_powershell_task_uses_file_mode(self):
+        script = self.root / "run daily.ps1"
+        config = task(script, use_args=True, args='"argument with spaces"')
+        command = self.worker(config)._build_command(script, config)
+        self.assertEqual(Path(command[0]).name, "powershell.exe")
+        self.assertEqual(command[-3:], ["-File", str(script), "argument with spaces"])
 
     def test_parallel_exception_releases_queue_wait(self):
         config = task(self.root / "fake.exe")

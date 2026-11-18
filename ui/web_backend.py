@@ -46,7 +46,8 @@ from core.mail_alerts import (
 )
 from core.native_process import native_popen
 from core.script_reports import iter_script_reports, load_script_reports, report_payload
-from core.updates import READY_UPDATE_STATUSES, check_item, discover_items, update_item, UpdateCancelled
+from core.task_icons import task_icon
+from core.updates import MAA_UPDATE_IN_APP, READY_UPDATE_STATUSES, check_item, discover_items, update_item, UpdateCancelled
 
 
 SCRIPT_CATALOG_URL = "https://mirrorchyan.com/zh/projects"
@@ -153,21 +154,33 @@ class JianszWebBridge:
             return f'"{sys.executable}"'
         return '"{}" "{}"'.format(sys.executable, self._base_dir / "main.py")
 
-    def _apply_windows_startup(self, enabled: bool) -> None:
-        if platform.system().lower() != "windows":
-            return
+    def _remove_legacy_windows_startup(self) -> None:
+        """清理指向这份安装的旧版 Run 项，避免留下不同版本的重复入口。"""
+        commands = {self._current_startup_command().casefold(),
+                    f'"{self._base_dir / "Jiansz.exe"}"'.casefold()}
         try:
             key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as key:
-                if enabled:
-                    winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, self._current_startup_command())
-                else:
-                    try:
-                        winreg.DeleteValue(key, APP_NAME)
-                    except FileNotFoundError:
-                        pass
-        except Exception as exc:
-            self._append_log(f"更新 Windows 开机自启动失败：{exc}")
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_QUERY_VALUE | winreg.KEY_SET_VALUE) as key:
+                entries = [winreg.EnumValue(key, index) for index in range(winreg.QueryInfoKey(key)[1])]
+                for name, value, value_type in entries:
+                    if (name.startswith("简小松·脚本调度助手 v") and value_type == winreg.REG_SZ
+                            and value.casefold() in commands):
+                        winreg.DeleteValue(key, name)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            self._append_log(f"清理旧版 Windows 自启动记录失败：{exc}")
+
+    def _migrate_windows_startup(self) -> None:
+        with self._lock:
+            if self._config.windows_startup:
+                try:
+                    self._daily_schedule.save_startup(True)
+                except ScheduleError as exc:
+                    self._append_log(f"迁移 Windows 开机自启动失败：{exc}")
+                    self._push_event("toast", {"tone": "error", "message": str(exc)})
+                    return
+            self._remove_legacy_windows_startup()
 
     def _record_abnormal_report(self, message: str, task_name: str = "") -> None:
         clean_msg = str(message or "").strip()
@@ -306,7 +319,7 @@ class JianszWebBridge:
                 self.updates_stop()
                 worker = self._worker
                 if worker:
-                    worker.stop_event.set()
+                    worker.request_stop(cleanup=False)
                 return
             self._allow_close = True
         if self._window is not None:
@@ -490,14 +503,27 @@ class JianszWebBridge:
                 tasks=tasks,
                 extra_settings=extra,
             )
-            self._config_manager.save(config)
+            previous_startup = self._config.windows_startup
+            startup_changed = config.windows_startup != previous_startup
+            if startup_changed:
+                self._daily_schedule.save_startup(config.windows_startup)
+            try:
+                self._config_manager.save(config)
+            except Exception:
+                if startup_changed:
+                    self._daily_schedule.save_startup(previous_startup)
+                raise
             self._config = config
-            self._apply_windows_startup(self._config.windows_startup)
+            if startup_changed:
+                self._remove_legacy_windows_startup()
             self._append_log("配置已保存。")
             return {"ok": True, "config": self._serialize_config()}
         except Exception as exc:
             self._append_log(f"保存配置失败：{exc}")
             return {"ok": False, "error": str(exc)}
+
+    def get_task_icons(self, requests: List[Dict[str, str]]) -> List[str]:
+        return [task_icon(str(item.get("path", "")), str(item.get("args", ""))) for item in requests]
 
     def browse_script_file(self) -> Dict[str, Any]:
         if self._window is None:
@@ -685,7 +711,7 @@ class JianszWebBridge:
         with self._lock:
             self._worker = worker
             if self._close_requested:
-                worker.stop_event.set()
+                worker.request_stop(cleanup=False)
 
         direct = Qt.ConnectionType.DirectConnection
         worker.log_signal.connect(self._on_worker_log, direct)
@@ -717,16 +743,18 @@ class JianszWebBridge:
             self._push_event("runner", self._running_snapshot())
 
     def stop_tasks(self) -> None:
-        if self._worker is not None and self._is_running:
+        worker = self._worker
+        if worker is not None and self._is_running:
             self._status_text = "正在停止..."
             self._push_event("runner", self._running_snapshot())
-            self._worker.request_stop()
+            worker.request_stop()
 
     def emergency_stop_tasks(self) -> None:
-        if self._worker is not None and self._is_running:
+        worker = self._worker
+        if worker is not None and self._is_running:
             self._status_text = "正在紧急停止..."
             self._push_event("runner", self._running_snapshot())
-            self._worker.request_emergency_stop()
+            worker.request_emergency_stop()
         else:
             self._append_log("当前没有运行中的调度任务。")
 
@@ -818,12 +846,12 @@ class JianszWebBridge:
             self._shutdown_deadline = time.time() + delay
         self._push_event("shutdown_warning", {"seconds": delay, "deadline": self._shutdown_deadline})
 
-    def _on_worker_finished(self, stopped_or_error: bool) -> None:
+    def _on_worker_finished(self, stopped_or_error: bool, user_stopped: bool) -> None:
         with self._lock:
             unverified_result = self._worker and self._worker.had_unverified_result
             self._is_paused = False
             if stopped_or_error:
-                if "停止" in self._status_text:
+                if user_stopped or "停止" in self._status_text:
                     self._status_text = "已停止"
                 else:
                     self._status_text = "已完成（有异常）"
@@ -843,6 +871,7 @@ class JianszWebBridge:
             deferred_shutdown = self._deferred_shutdown
             self._deferred_shutdown = None
             finish_status = self._status_text
+            has_error = self._run_task_error_count > 0
         if mail_context:
             settings, session_id, tasks = mail_context
             alert_tasks = [
@@ -850,9 +879,12 @@ class JianszWebBridge:
                 if not (outcomes.get(key, {}).get("result") == "unknown"
                         and outcomes[key].get("status", "").startswith("每日委托"))
             ]
+            if user_stopped:
+                alert_tasks = [(key, name) for key, name in alert_tasks
+                               if outcomes.get(key, {}).get("result") == "failed"]
             body = summarize_outcomes(alert_tasks, outcomes)
-            if not body and stopped_or_error:
-                body = finish_status
+            if not body and stopped_or_error and (not user_stopped or has_error):
+                body = "手动停止前发生了任务异常。" if user_stopped else finish_status
             if body:
                 self._notify_by_mail(
                     settings, "简小松 · 本轮运行有异常",
@@ -867,7 +899,8 @@ class JianszWebBridge:
             self._refresh_script_report_day()
             for key, report in self._script_reports.items():
                 if report["result"] == "running":
-                    report = {**report, "result": "unknown", "status": "本轮未留下最终结果。",
+                    result, status = ("stopped", "已停止") if user_stopped else ("unknown", "本轮未留下最终结果。")
+                    report = {**report, "result": result, "status": status,
                               "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
                     self._script_reports[key] = report
                     self._push_event("script_report", {"key": key, "report": report})
@@ -1000,12 +1033,12 @@ class JianszWebBridge:
                     ready = ready and not self._update_stop.is_set() and not self._close_requested
                     if mode == "prepare":
                         ready = ready and signature == self._launch_signature()
-                if mode == "prepare" and not ready:
+                if mode == "prepare" and not ready and not self._update_stop.is_set():
                     checked_items = [self._update_items[index] for index, _ in selected]
                     lines = [f"{item.name}：{item.status}" for item in checked_items
                              if item.kind != "unsupported" and item.status not in READY_UPDATE_STATUSES]
-                    body = "\n".join(lines) or "启动前检查被取消或未完成。"
-                    description = "启动前检查被取消。" if self._update_stop.is_set() else "启动前检查未通过，任务队列未开始。"
+                    body = "\n".join(lines) or "启动前检查未完成。"
+                    description = "启动前检查未通过，任务队列未开始。"
                     self._notify_by_mail(
                         mail_settings, "简小松 · 本轮未启动", body,
                         html_body=render_mail("本轮未启动", description, [
@@ -1021,13 +1054,15 @@ class JianszWebBridge:
                         if ready:
                             self._prepared_update_ticket = (signature, time.monotonic())
                     self._update_busy = False
+                    canceled = self._update_stop.is_set()
                     if agent_launch and not ready:
-                        self._status_text = "脚本未就绪，任务未启动"
+                        self._status_text = "已取消启动" if canceled else "脚本未就绪，任务未启动"
                         self._push_event("runner", self._running_snapshot())
                     self._push_event("update_done", {
-                        "mode": mode, "ready": ready,
+                        "mode": mode, "ready": ready, "canceled": canceled,
                         "agentLaunch": agent_launch,
                         "deferred": [item.name for _, item in selected if item.status == "沿用本地版本"],
+                        "inAppUpdates": [f"{item.name} {item.latest}" for _, item in selected if item.status == MAA_UPDATE_IN_APP],
                         "unsupported": [item.name for _, item in selected if item.kind == "unsupported"],
                     })
                     if agent_launch and ready:

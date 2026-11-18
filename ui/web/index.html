@@ -101,7 +101,7 @@
             <div class="hero-scrim"></div>
             <div class="hero-content">
               <div class="hero-left">
-                <div class="hero-badge">Jiansz · 一条龙自动调度中枢</div>
+                <div class="hero-badge">简小松 · 一条龙自动调度中枢</div>
                 <h1 class="hero-title">简小松·脚本调度助手</h1>
                 <p class="hero-subtitle">多脚本顺序托管 · 外部进程守护 · 脚本日志报告</p>
               </div>
@@ -446,7 +446,7 @@
                 <svg class="setting-icon" aria-hidden="true"><use href="#settings-symbol-play"/></svg>
                 <div>
                   <div class="setting-title">程序启动后自动开始执行任务</div>
-                  <div class="setting-desc">打开软件 1.5 秒后自动启动已开启的任务队列</div>
+                  <div class="setting-desc">打开软件后显示倒计时，结束时自动执行已启用的任务，可取消本次启动</div>
                 </div>
                 <label class="switch-lg"><input type="checkbox" id="setAutoStart" /><span></span></label>
               </div>
@@ -579,7 +579,7 @@
               <div class="setting-row">
                 <svg class="setting-icon" aria-hidden="true"><use href="#settings-symbol-download"/></svg>
                 <div>
-                  <div class="setting-title">Jiansz 版本更新</div>
+                  <div class="setting-title">简小松版本更新</div>
                   <div class="setting-desc" id="appReleaseStatus" role="status" aria-live="polite">检查简小松是否有新的稳定版</div>
                 </div>
                 <div class="panel-head-actions">
@@ -737,6 +737,18 @@
       </div>
     </div>
   </div>
+
+  <dialog class="auto-start-dialog glass-panel" id="autoStartDialog"
+          aria-labelledby="autoStartTitle" aria-describedby="autoStartDescription">
+    <p class="modal-desc" id="autoStartDescription">倒计时结束后自动检查脚本更新并执行任务。</p>
+    <div class="auto-start-ring" id="autoStartRing">
+      <div>
+        <h3 id="autoStartTitle">即将自动启动</h3>
+        <div class="auto-start-seconds" id="autoStartSeconds" role="timer"></div>
+      </div>
+    </div>
+    <button type="button" class="btn-subtle" id="btnCancelAutoStart" autofocus>取消</button>
+  </dialog>
 
   <!-- Toast 通知栈 -->
   <div class="toast-stack" id="toastStack"></div>

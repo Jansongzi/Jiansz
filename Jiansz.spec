@@ -15,7 +15,7 @@ windows_version = versioninfo.VSVersionInfo(
         versioninfo.StringFileInfo([versioninfo.StringTable('080404b0', [
             versioninfo.StringStruct('FileDescription', '简小松·脚本调度助手'),
             versioninfo.StringStruct('FileVersion', app_version),
-            versioninfo.StringStruct('ProductName', 'Jiansz'),
+            versioninfo.StringStruct('ProductName', '简小松'),
             versioninfo.StringStruct('ProductVersion', app_version),
             versioninfo.StringStruct('OriginalFilename', 'Jiansz.exe'),
         ])]),

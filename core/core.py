@@ -23,6 +23,7 @@ import os
 import platform
 import subprocess
 import shlex
+import shutil
 import ctypes
 import ctypes.wintypes as wintypes
 import winreg
@@ -656,7 +657,7 @@ def resolve_task_command(task, script_path=None):
     args = [part.strip('"') for part in shlex.split(text, posix=False)] if text else []
     if args:
         first = Path(args[0]).expanduser()
-        if first.is_absolute() or args[0].startswith(("./", ".\\")) or first.suffix.lower() in {".exe", ".bat", ".cmd", ".py"}:
+        if first.is_absolute() or args[0].startswith(("./", ".\\")) or first.suffix.lower() in {".exe", ".bat", ".cmd", ".py", ".ps1"}:
             return (path.parent / first).resolve(), args[1:]
     return path, args
 
@@ -667,7 +668,7 @@ class ScriptRunnerWorker(QObject):
     progress_signal = Signal(int, int)
     task_started_signal = Signal(str, int, int)
     elapsed_signal = Signal(int)
-    finished_signal = Signal(bool)  # bool: stopped_by_user_or_error
+    finished_signal = Signal(bool, bool)  # 停止或失败，是否由用户停止
     buttons_unlock_signal = Signal()
     shutdown_prompt_signal = Signal(int)
     task_error_signal = Signal(str)
@@ -691,6 +692,7 @@ class ScriptRunnerWorker(QObject):
         self.logger = logger
         self.stats_manager = stats_manager
         self.stop_event = threading.Event()
+        self.user_stop_requested = False
         self.pause_event = threading.Event()
         self.current_processes: List[subprocess.Popen[Any]] = []
         self.current_process_names_by_pid: Dict[int, List[str]] = {}
@@ -816,7 +818,7 @@ class ScriptRunnerWorker(QObject):
                 self.log("没有启用的任务，执行结束。")
                 self.status_signal.emit("已完成")
                 self.progress_signal.emit(0, 0)
-                self.finished_signal.emit(False)
+                self.finished_signal.emit(False, False)
                 return
 
             self.log(f"运行日志文件：{self.logger.log_path().name}")
@@ -868,7 +870,7 @@ class ScriptRunnerWorker(QObject):
                 self.log("任务队列已停止。")
                 self._save_abnormal_report()
                 self.stats_manager.save_session()
-                self.finished_signal.emit(True)
+                self.finished_signal.emit(True, self.user_stop_requested)
                 return
 
             if self.had_task_error:
@@ -895,7 +897,7 @@ class ScriptRunnerWorker(QObject):
                     and not self.had_unverified_result and not self.stop_event.is_set()):
                 delay = max(1, self.shutdown_delay_seconds)
                 self.shutdown_prompt_signal.emit(delay)
-            self.finished_signal.emit(self.had_task_error)
+            self.finished_signal.emit(self.had_task_error, False)
 
         except Exception as exc:
             self.stop_event.set()
@@ -912,7 +914,7 @@ class ScriptRunnerWorker(QObject):
             except Exception as stats_error:
                 self.log(f"保存运行统计失败：{stats_error}")
             finally:
-                self.finished_signal.emit(True)
+                self.finished_signal.emit(True, False)
 
     def _run_concurrent_group(self, group_name: str, group_tasks: List[TaskConfig], start_index: int, total: int) -> str:
         policy = group_tasks[0].concurrent_policy if group_tasks[0].concurrent_policy in CONCURRENT_POLICIES else "wait_all"
@@ -1091,14 +1093,15 @@ class ScriptRunnerWorker(QObject):
                 result.append(task)
         return result
 
-    def request_stop(self) -> None:
+    def request_stop(self, *, cleanup: bool = True) -> None:
+        self.user_stop_requested = True
         self.stop_event.set()
         self._clear_pause()
-        self._stop_owned_processes("停止执行")
+        if cleanup:
+            self._stop_owned_processes("停止执行")
 
     def request_emergency_stop(self) -> None:
-        self.stop_event.set()
-        self._clear_pause()
+        self.request_stop(cleanup=False)
         self._stop_owned_processes("紧急停止")
 
     def _stop_owned_processes(self, label: str) -> None:
@@ -1299,12 +1302,16 @@ class ScriptRunnerWorker(QObject):
             return verdict.evidence
 
         def record_launch_failure(message):
+            if self.user_stop_requested:
+                record(0, "已取消启动", "stopped")
+                return "stop_requested"
             if daily_only:
                 verdict = daily_result()
                 record(0, daily_status(verdict), verdict.status)
             else:
                 self.mark_task_error(message, name)
                 record(0, message, "failed")
+            return "continue"
 
         self.log(f"开始执行任务：{name}")
         self.log(f"脚本路径：{script_text}")
@@ -1321,21 +1328,18 @@ class ScriptRunnerWorker(QObject):
         if not script_text:
             message = f"任务「{name}」脚本路径为空，已跳过。"
             self.log(message)
-            record_launch_failure(message)
-            return "continue"
+            return record_launch_failure(message)
 
         script_path = Path(script_text).expanduser().resolve()
         if not script_path.exists():
             message = f"任务「{name}」脚本不存在，已跳过：{script_path}"
             self.log(message)
-            record_launch_failure(message)
-            return "continue"
+            return record_launch_failure(message)
 
         if not script_path.is_file():
             message = f"任务「{name}」路径不是文件，已跳过：{script_path}"
             self.log(message)
-            record_launch_failure(message)
-            return "continue"
+            return record_launch_failure(message)
 
         try:
             executable, _ = resolve_task_command(task, script_path)
@@ -1343,8 +1347,7 @@ class ScriptRunnerWorker(QObject):
         except Exception as exc:
             message = f"任务「{name}」构建启动命令失败，已跳过：{exc}"
             self.log(message)
-            record_launch_failure(message)
-            return "continue"
+            return record_launch_failure(message)
 
         cwd = str(script_path.parent)
         log_probe = TaskLogProbe.capture(executable)
@@ -1362,16 +1365,16 @@ class ScriptRunnerWorker(QObject):
         except Exception as exc:
             message = f"任务「{name}」启动失败，已跳过：{exc}"
             self.log(message)
-            record_launch_failure(message)
-            return "continue"
+            return record_launch_failure(message)
 
         self.log(f"任务「{name}」已启动，PID：{process.pid}")
         start_time = self._active_time()
-        if not self._confirm_launch_success(task, process, name, start_time, monitor_spec, daily_only=daily_only):
-            if self.stop_event.is_set():
-                self._remove_current_process(process)
-                record(int(self._active_time() - start_time), "已停止", "stopped")
-                return "stop_requested"
+        launch_confirmed = self._confirm_launch_success(task, process, name, start_time, monitor_spec, daily_only=daily_only)
+        if self.stop_event.is_set():
+            self._remove_current_process(process)
+            record(int(self._active_time() - start_time), "已停止", "stopped")
+            return "stop_requested"
+        if not launch_confirmed:
             elapsed = int(self._active_time() - start_time)
             if daily_only:
                 # 很快退出的脚本仍可能留下“今日已完成”的可核对记录。
@@ -1416,7 +1419,7 @@ class ScriptRunnerWorker(QObject):
             source = ""
             if daily_only:
                 verdict = self._read_task_result(log_probe, process, name)
-                if verdict is None:
+                if verdict is None or self.user_stop_requested:
                     record(int(self._active_time() - start_time), "核对日志时停止", "stopped")
                     return "stop_requested"
                 result, source = verdict.status, verdict.source
@@ -1446,8 +1449,14 @@ class ScriptRunnerWorker(QObject):
 
             self._track_children(process)
             return_code = process.poll()
+            if self.stop_event.is_set():
+                continue
             now = self._active_time()
             monitor_kind = str(monitor_spec.get("kind", "direct"))
+
+            # MAA 已退出时核对本轮进程的日志，避免被仍有同名标题的模拟器窗口拖住。
+            if return_code is not None and log_probe and log_probe.kind == "maa":
+                return finish_with_log(f"MAA 已退出，退出码：{return_code}")
 
             # 新关键词字段接管主等待逻辑。
             # 优先按“游戏窗口关键词”，其次按“目标进程关键词”，旧 wait_mode 只做兼容兜底。
@@ -1570,8 +1579,12 @@ class ScriptRunnerWorker(QObject):
                 return False
             self._track_children(process)
             return_code = process.poll()
+            if self.stop_event.is_set():
+                return False
             if return_code is not None:
                 present, matched_keyword = self._is_monitor_present(monitor_spec)
+                if self.stop_event.is_set():
+                    return False
                 if present:
                     label = str(monitor_spec.get("label", "监控目标"))
                     self.log(f"任务「{name}」直接进程已退出，但已检测到{label}「{matched_keyword}」，判定启动成功。")
@@ -1650,13 +1663,21 @@ class ScriptRunnerWorker(QObject):
         self._remove_current_process(process)
         return "continue"
 
-    def _build_command(self, script_path: Path, task: TaskConfig) -> List[str]:
+    def _build_command(self, script_path: Path, task: TaskConfig) -> List[str] | str:
         executable, args = resolve_task_command(task, script_path)
         suffix = executable.suffix.lower()
         if suffix in {".bat", ".cmd"} and platform.system().lower() == "windows":
-            return ["cmd.exe", "/d", "/c", str(executable), *args]
+            # /s 去掉最外层引号，保留路径与参数的独立引号。
+            cmd = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32/cmd.exe"
+            prefix = subprocess.list2cmdline([str(cmd), "/d", "/v:off", "/s", "/c"])
+            quoted = " ".join('"' + value.replace('"', '""') + '"' for value in [str(executable), *args])
+            return f'{prefix} "{quoted}"'
+        if suffix == ".ps1" and platform.system().lower() == "windows":
+            powershell = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe"
+            return [str(powershell), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "RemoteSigned",
+                    "-File", str(executable), *args]
         if suffix == ".py":
-            return [self._python_for_child_script(), str(executable), *args]
+            return [*self._python_for_child_script(), str(executable), *args]
         return [str(executable), *args]
 
     def _is_process_name_running(self, process_name: str) -> bool:
@@ -1759,19 +1780,19 @@ class ScriptRunnerWorker(QObject):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _python_for_child_script(self) -> str:
-        """
-        用于执行用户配置的 .py 脚本。
+    def _python_for_child_script(self) -> List[str]:
+        if not getattr(sys, "frozen", False):
+            return [sys.executable]
+        if configured := os.environ.get("AUTO_DAILY_PYTHON", "").strip().strip('"'):
+            return [configured]
+        python = shutil.which("python.exe")
+        if python and "windowsapps" not in {part.casefold() for part in Path(python).parts}:
+            return [python]
+        if launcher := shutil.which("py.exe"):
+            return [launcher, "-3"]
+        raise RuntimeError("未找到 Python 3。请安装解释器，或用 AUTO_DAILY_PYTHON 指定 python.exe。")
 
-        普通 python main.py 运行时，使用当前解释器。
-        PyInstaller 打包后，sys.executable 会变成当前 GUI 程序本身，
-        此时优先读取环境变量 AUTO_DAILY_PYTHON，否则尝试使用 PATH 中的 python。
-        """
-        if getattr(sys, "frozen", False):
-            return os.environ.get("AUTO_DAILY_PYTHON", "python")
-        return sys.executable
-
-    def _start_process(self, command: List[str], cwd: str) -> Any:
+    def _start_process(self, command: List[str] | str, cwd: str) -> Any:
         creationflags = 0
         if platform.system().lower() == "windows":
             creationflags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
@@ -1789,7 +1810,7 @@ class ScriptRunnerWorker(QObject):
         except OSError as exc:
             # Windows 上带 requireAdministrator 清单的 exe，非管理员 Popen 会报 WinError 740。
             # 这里自动改用 runas 拉起 UAC，而不是让用户再手动右键管理员启动。
-            if platform.system().lower() == "windows" and getattr(exc, "winerror", None) == 740:
+            if isinstance(command, list) and platform.system().lower() == "windows" and getattr(exc, "winerror", None) == 740:
                 self.log("检测到该脚本需要管理员权限，正在尝试弹出 UAC 提权启动。")
                 return self._start_process_elevated(command, cwd)
             raise

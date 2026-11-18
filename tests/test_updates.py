@@ -17,6 +17,7 @@ from ui.update_dialog import UpdateDialog
 
 class Response(io.BytesIO):
     status = 200
+    url = ""
 
     def __init__(self, payload):
         super().__init__(payload)
@@ -126,7 +127,7 @@ class UpdateTests(unittest.TestCase):
                 check_item(item, Event(), lambda _: None)
             self.assertEqual(item.status, "本地版本较新")
 
-    def test_network_failure_is_not_up_to_date(self):
+    def test_network_failure_uses_verified_local_version_without_claiming_latest(self):
         with tempfile.TemporaryDirectory() as directory:
             executable = Path(directory) / "BetterGI.exe"
             executable.touch()
@@ -134,7 +135,80 @@ class UpdateTests(unittest.TestCase):
             with patch("core.updates.local_version", return_value="0.66.0"), \
                  patch("core.updates._release_version", side_effect=OSError("offline")):
                 check_item(item, Event(), lambda _: None)
+            self.assertEqual(item.status, "沿用本地版本")
+            self.assertEqual(item.latest, "")
+            self.assertIn("0.66.0", item.detail)
+
+    def test_release_page_failure_uses_windows_curl(self):
+        from core.updates import _release_version
+        with patch("core.updates.urlopen", side_effect=TimeoutError), \
+             patch("core.updates._curl_release_url", return_value="https://github.com/owner/repo/releases/tag/v1.2.3"):
+            self.assertEqual(_release_version("owner/repo"), "v1.2.3")
+
+    def test_release_page_and_curl_failure_use_official_api(self):
+        from core.updates import _release_version
+        response = Response(json.dumps({
+            "html_url": "https://github.com/owner/repo/releases/tag/v1.2.3", "draft": False, "prerelease": False,
+        }).encode())
+        with patch("core.updates.urlopen", side_effect=[TimeoutError, response]) as request, \
+             patch("core.updates._curl_release_url", side_effect=OSError("offline")):
+            self.assertEqual(_release_version("owner/repo"), "v1.2.3")
+        self.assertEqual(request.call_args.args[0].full_url, "https://api.github.com/repos/owner/repo/releases/latest")
+
+    def test_check_cancellation_does_not_fall_back_to_local_or_api(self):
+        from core.updates import _release_version
+        stop = Event()
+        def cancel(url, token):
+            token.set()
+            raise UpdateCancelled("cancel")
+        with patch("core.updates.urlopen", side_effect=TimeoutError) as request, \
+             patch("core.updates._curl_release_url", side_effect=cancel):
+            with self.assertRaises(UpdateCancelled):
+                _release_version("owner/repo", stop=stop)
+        self.assertEqual(request.call_count, 1)
+
+    def test_offline_check_blocks_missing_or_changed_local_installation(self):
+        from core.updates import ReleaseQueryUnavailable
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = root / "OneDragon-RuntimeLauncher.exe"
+            executable.touch()
+            item = UpdateItem("onedragon", "绝区零一条龙", "script", executable, "owner/repo")
+            with patch("core.updates.local_version", return_value="v2.6.1"), \
+                 patch("core.updates._release_version", side_effect=ReleaseQueryUnavailable("offline")):
+                check_item(item, Event(), Mock())
+                self.assertEqual(item.status, "检查失败")
+                (root / ".runtime").mkdir()
+                (root / ".runtime/python312.dll").touch()
+                check_item(item, Event(), Mock())
+                self.assertEqual(item.status, "沿用本地版本")
+            with patch("core.updates.local_version", side_effect=["v2.6.1", "v2.6.2"]), \
+                 patch("core.updates._release_version", side_effect=ReleaseQueryUnavailable("offline")):
+                check_item(item, Event(), Mock())
+                self.assertEqual(item.status, "检查失败")
+
+    def test_local_read_failure_cannot_reuse_a_previous_successful_check(self):
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / "BetterGI.exe"
+            executable.touch()
+            item = UpdateItem("bettergi", "BetterGI", "script", executable, "owner/repo",
+                              current="0.67.0", latest="0.67.0", status="已是最新")
+            with patch("core.updates.local_version", side_effect=OSError("missing dependency")), \
+                 patch("core.updates._release_version") as remote:
+                check_item(item, Event(), Mock())
             self.assertEqual(item.status, "检查失败")
+            self.assertEqual(item.current, "")
+            remote.assert_not_called()
+
+    def test_preview_release_is_not_used_as_a_stable_update(self):
+        from core.updates import _release_version
+        response = Response(b"")
+        response.url = "https://github.com/owner/repo/releases/tag/v1.2.3-beta"
+        with patch("core.updates.urlopen", return_value=response), \
+             patch("core.updates._curl_release_url") as fallback:
+            with self.assertRaises(UpdateError):
+                _release_version("owner/repo")
+        fallback.assert_not_called()
 
     def test_discovery_contains_only_enabled_scripts(self):
         tasks = [SimpleNamespace(enabled=True, script_path=f"C:/Tools/{name}", name=name)

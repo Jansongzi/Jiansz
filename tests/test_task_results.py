@@ -37,6 +37,52 @@ class TaskLogResultsTests(unittest.TestCase):
         self.assertEqual(probe.inspect({123}), daily_result(True, True, logfile.name))
         self.assertEqual(probe.inspect({222}).status, "unknown")
 
+    @staticmethod
+    def maa_log(previous_task):
+        callbacks = [
+            ("TaskChainStart", {}),
+            ("SubTaskCompleted", {"details": {"task": "ReceiveAward"}, "pre_task": previous_task}),
+            ("TaskChainCompleted", {}),
+            ("AllTasksCompleted", {"finished_tasks": [6]}),
+        ]
+        header = "[2026-11-17 13:17:23.750][INF][Px123][Tx456] Assistant::append_callback |"
+        return "".join(
+            f"{header} {callback} {json.dumps(dict(taskchain='Award', taskid=6, uuid='test', **fields))}\n"
+            for callback, fields in callbacks
+        )
+
+    def test_maa_requires_fresh_daily_reward_and_matching_pid(self):
+        log = self.file("debug/asst.log", self.maa_log("DailyTask"))
+        probe = TaskLogProbe.capture(self.root / "MAA.exe")
+        self.assertEqual(probe.inspect({123}).status, "unknown")
+        with log.open("a", encoding="utf-8") as file:
+            file.write(self.maa_log("WeeklyTask"))
+        self.assertEqual(probe.inspect({123}), daily_result(source="asst.log"))
+        with log.open("a", encoding="utf-8") as file:
+            file.write(self.maa_log("Award"))
+        self.assertEqual(probe.inspect({456}).status, "unknown")
+        self.assertEqual(probe.inspect({123}), daily_result(True, True, "asst.log"))
+
+    def test_maa_exit_uses_log_even_with_configured_simulator_window(self):
+        exe = self.file("MAA.exe")
+        task = TaskConfig.from_dict(
+            {"name": "MAA", "script_path": str(exe), "enabled": True, "window_keywords": ["mumu"]}, 1,
+        )
+        stats = RuntimeStatsManager(self.root)
+        worker = ScriptRunnerWorker([task], False, 60, FileLogger(self.root / "logs"), stats)
+
+        def launch(*args):
+            self.file("debug/asst.log", self.maa_log("DailyTask"))
+            return Mock(pid=123, poll=Mock(return_value=0))
+
+        with patch.object(worker, "_start_process", side_effect=launch), \
+             patch.object(worker, "_confirm_launch_success", return_value=True), \
+             patch.object(worker, "_is_monitor_present") as monitor:
+            self.assertEqual(worker._run_one_task(task), "continue")
+        monitor.assert_not_called()
+        self.assertEqual(stats.records[0]["result"], "success")
+        self.assertEqual(stats.records[0]["source"], "asst.log")
+
     def test_march7th_daily_success_ignores_nonzero_exit(self):
         probe = TaskLogProbe.capture(self.root / "March7th Assistant.exe")
         run = {"pid": 123, "started_at": datetime.now().astimezone().isoformat(), "status": "running"}
@@ -66,6 +112,37 @@ class TaskLogResultsTests(unittest.TestCase):
                  "2026-11-14 INFO TaskExecutor DailyTask:通过坐标领取每日奖励",
                  "2026-11-14 ERROR TaskExecutor TaskExecutor:Weekly Task exception stopped Traceback"]
         self.assertEqual(_okww([("ok-script.log", line) for line in lines], {12}),
+                         daily_result(True, source="ok-script.log", pending=True))
+
+    def test_okww_recognizes_completed_reward_flow_in_both_locales(self):
+        for action, completion in (
+            ("通过坐标领取每日奖励", "每日任务已完成"),
+            ("claim daily reward via  coordinate", "Daily Task Completed"),
+        ):
+            with self.subTest(action=action):
+                lines = [
+                    "2026-11-18 INFO MainThread ok:ok-script init v3.8.4 pid=12",
+                    "2026-11-18 INFO TaskExecutor DailyTask:info_set current task claim daily",
+                    f"2026-11-18 INFO TaskExecutor DailyTask:{action}",
+                    "2026-11-18 INFO TaskExecutor DailyTask:info_set current task wait main esc=True",
+                    "2026-11-18 INFO TaskExecutor DailyTask:info_set current task in main esc=True",
+                    "2026-11-18 INFO TaskExecutor DailyTask:info_set current task claim mail",
+                    f"2026-11-18 INFO TaskExecutor DailyTask:{completion}",
+                ]
+                self.assertEqual(_okww([("ok-script.log", line) for line in lines], {12}),
+                                 daily_result(True, True, "ok-script.log"))
+
+    def test_okww_reward_does_not_carry_over_from_previous_process(self):
+        lines = [
+            "2026-11-18 INFO MainThread ok:ok-script init v3.8.4 pid=12",
+            "2026-11-18 INFO TaskExecutor DailyTask:通过坐标领取每日奖励",
+            "2026-11-18 INFO TaskExecutor DailyTask:info_set current task claim mail",
+            "2026-11-18 INFO TaskExecutor DailyTask:每日任务已完成",
+            "2026-11-18 INFO MainThread ok:ok-script init v3.8.4 pid=34",
+            "2026-11-18 INFO TaskExecutor DailyTask:info_set total daily points 100",
+            "2026-11-18 ERROR TaskExecutor DailyTask:领取过程失败",
+        ]
+        self.assertEqual(_okww([("ok-script.log", line) for line in lines], {34}),
                          daily_result(True, source="ok-script.log", pending=True))
 
     def test_onedragon_checks_daily_activity_despite_other_failure(self):

@@ -1,6 +1,7 @@
 @echo off
 setlocal
-title Jiansz - Admin Launcher
+chcp 65001 >nul
+title 简小松 - 管理员启动
 cd /d "%~dp0"
 
 REM Relaunch this launcher with administrator permission if needed.
@@ -11,7 +12,7 @@ if not "%errorlevel%"=="0" (
     exit /b
 )
 
-echo Start Jiansz [Administrator]
+echo 正以管理员身份启动简小松
 echo Current directory: %CD%
 echo ==========================================
 echo.

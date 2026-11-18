@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import ctypes
 from ctypes import wintypes
+import os
 from pathlib import Path
 import sys
+import sysconfig
 from threading import Thread
 
 from bottle import Bottle, abort, static_file
@@ -77,9 +79,10 @@ def _round_window_corners(window) -> None:
     form = window.native
     user32 = ctypes.windll.user32
     gdi32 = ctypes.windll.gdi32
-    get_dpi = user32.GetDpiForWindow
-    get_dpi.argtypes = [wintypes.HWND]
-    get_dpi.restype = wintypes.UINT
+    get_dpi = getattr(user32, "GetDpiForWindow", None)
+    if get_dpi is not None:
+        get_dpi.argtypes = [wintypes.HWND]
+        get_dpi.restype = wintypes.UINT
     set_region = user32.SetWindowRgn
     set_region.argtypes = [wintypes.HWND, wintypes.HRGN, wintypes.BOOL]
     create_region = gdi32.CreateRoundRectRgn
@@ -97,7 +100,8 @@ def _round_window_corners(window) -> None:
             return
         hwnd = form.Handle.ToInt64()
         width, height = form.Width, form.Height
-        diameter = 0 if state == "Maximized" else round(2 * 16 * (get_dpi(hwnd) or 96) / 96)
+        dpi = (get_dpi(hwnd) if get_dpi is not None else 96) or 96
+        diameter = 0 if state == "Maximized" else round(2 * 16 * dpi / 96)
         shape = (hwnd, width, height, diameter)
         if shape == previous or min(width, height) <= 0:
             return
@@ -142,7 +146,6 @@ def _install_tray(window, bridge: JianszWebBridge) -> None:
             if form.WindowState == FormWindowState.Minimized:
                 form.WindowState = FormWindowState.Normal
             form.Activate()
-            tray.Visible = False
 
         def hide():
             tray.Visible = True
@@ -162,12 +165,39 @@ def _install_tray(window, bridge: JianszWebBridge) -> None:
         tray.DoubleClick += restore
         form.FormClosed += dispose
         bridge._hide_in_tray = lambda: form.BeginInvoke(Action(hide))
+        tray.Visible = True
 
     form.BeginInvoke(Action(install))
 
 
+def _webview2_startup_error() -> str:
+    machine = {"win32": "x86", "win-amd64": "x64", "win-arm64": "arm64"}.get(sysconfig.get_platform())
+    if machine is None:
+        return "简小松需要 Windows 及 Microsoft Edge WebView2 Runtime。"
+    library = Path(webview.__file__).parent / "lib" / "runtimes" / f"win-{machine}" / "native" / "WebView2Loader.dll"
+    try:
+        loader = ctypes.WinDLL(str(library))
+    except OSError:
+        return "简小松缺少 WebView2 加载组件。请先将整个压缩包解压到同一目录，再打开 Jiansz.exe。"
+    query = loader.GetAvailableCoreWebView2BrowserVersionString
+    query.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_void_p)]
+    query.restype = ctypes.c_long
+    version = ctypes.c_void_p()
+    try:
+        result = query(webview.settings.get("WEBVIEW2_RUNTIME_PATH") or None, ctypes.byref(version))
+        if result == 0 and version.value:
+            return ""
+    finally:
+        free = ctypes.windll.ole32.CoTaskMemFree
+        free.argtypes = [ctypes.c_void_p]
+        free.restype = None
+        free(version)
+    return "请先安装 Microsoft Edge WebView2 Runtime，再重新打开简小松。"
+
+
 def run_app(*, start_daily: bool = False, agent_host: bool = False) -> int:
     base_dir = app_dir()
+    os.chdir(base_dir)
     try:
         endpoint = AgentPipe(base_dir)
     except InstanceExists:
@@ -175,6 +205,10 @@ def run_app(*, start_daily: bool = False, agent_host: bool = False) -> int:
             reply = send_start(base_dir)
             return 0 if reply["status"] in {"accepted", "running", "updating"} else 1
         return 0
+    prerequisite_error = _webview2_startup_error()
+    if prerequisite_error:
+        ctypes.windll.user32.MessageBoxW(None, prerequisite_error, APP_NAME, 0x10)
+        return 1
     bridge = JianszWebBridge(base_dir=base_dir, agent_host=agent_host)
     wsgi_app = create_wsgi_app(base_dir)
 
@@ -195,6 +229,7 @@ def run_app(*, start_daily: bool = False, agent_host: bool = False) -> int:
     window.events.closing += bridge._on_window_closing
     window.events.shown += lambda: _round_window_corners(window)
     window.events.shown += lambda: _install_tray(window, bridge)
+    window.events.shown += bridge._migrate_windows_startup
 
     def start_endpoint():
         if start_daily:

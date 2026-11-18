@@ -11,4 +11,4 @@ description: 在当前 Windows 电脑上通过简小松运行已配置的游戏�
 & "C:\path\to\Jiansz\Jiansz-Daily.exe"
 ```
 
-用户只想查询时，在命令末尾加 `--status`。读取返回的 JSON 并用 `message` 回复用户。`accepted` 表示已受理，简小松会先检查并更新脚本。`running` 或 `updating` 表示已有操作进行中。进程启动和请求受理都不足以证明日常已经完成。遇到 `error` 或 `blocked` 时报告消息。冷启动由本机已配置的 `Jiansz_AutoRun` 计划任务处理。
+用户只想查询时，在命令末尾加 `--status`。读取返回的 JSON 并用 `message` 回复用户。`accepted` 表示已受理，简小松会先检查并更新脚本。`running` 或 `updating` 表示已有操作进行中。进程启动和请求受理都不足以证明日常已经完成。遇到 `error` 或 `blocked` 时报告消息。冷启动优先使用与当前安装匹配的 `Jiansz_AutoRun` 计划任务。未设置该任务时，启动器会打开同目录的 `Jiansz.exe` 并请求 Windows 管理员权限。

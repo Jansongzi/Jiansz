@@ -487,7 +487,6 @@ html, body {
   font-size: 12px; color: var(--text-secondary); cursor: pointer; transition: background 0.15s, border-color 0.15s;
 }
 .chip-toggle:hover { background: rgba(255, 255, 255, 0.08); color: #fff; }
-.chip-toggle input { accent-color: var(--accent); width: 14px; height: 14px; cursor: pointer; }
 
 /* 运行中控制栏 */
 .dock-running { display: flex; flex-direction: column; gap: 10px; }
@@ -759,16 +758,21 @@ select option { background: #101728; color: #f8fafc; }
 .script-catalog-card { max-width: 620px; max-height: calc(100dvh - 48px); }
 .script-catalog-guide { display: block; width: 100%; height: min(48vh, 420px); object-fit: contain; }
 .script-catalog-choice { display: inline-flex; width: fit-content; gap: 7px; align-items: center; cursor: pointer; }
-.script-catalog-choice input {
+:is(.chip-toggle, .script-catalog-choice) input {
   appearance: none; display: grid; place-items: center; width: 16px; height: 16px;
   background: transparent; border: 1px solid var(--text-muted); border-radius: 4px;
 }
-.script-catalog-choice input:checked { background: var(--accent); border-color: var(--accent); }
-.script-catalog-choice input:checked::after {
+:is(.chip-toggle, .script-catalog-choice) input:checked { background: var(--accent); border-color: var(--accent); }
+:is(.chip-toggle, .script-catalog-choice) input:checked::after {
   content: ""; width: 4px; height: 8px; border: solid #fff; border-width: 0 2px 2px 0;
   transform: translateY(-1px) rotate(45deg);
 }
-.script-catalog-choice input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+:is(.chip-toggle, .script-catalog-choice) input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.chip-toggle input { width: 14px; height: 14px; cursor: pointer; }
+@media (forced-colors: active) {
+  :is(.chip-toggle, .script-catalog-choice) input { appearance: auto; }
+  :is(.chip-toggle, .script-catalog-choice) input:checked::after { content: none; }
+}
 .script-catalog-choice:has(input:disabled) { opacity: .55; cursor: default; }
 #btnConfirmScriptCatalog { min-width: 148px; }
 #btnConfirmScriptCatalog:disabled { opacity: .55; cursor: default; }
@@ -801,6 +805,23 @@ select option { background: #101728; color: #f8fafc; }
 }
 .abnormal-item .ab-time { font-size: 11px; color: var(--text-muted); font-family: var(--font-mono); margin-bottom: 3px; }
 .shutdown-big-num { font-size: 42px; font-weight: 800; color: #fbbf24; font-family: var(--font-mono); padding: 8px 0; }
+
+.auto-start-dialog {
+  inset: 0; margin: auto; padding: 24px; width: min(400px, calc(100% - 32px));
+  max-height: calc(100% - 32px); overflow: auto; color: var(--text-primary); text-align: center;
+}
+.auto-start-dialog::backdrop { background: rgba(4, 7, 15, 0.70); }
+.auto-start-ring {
+  width: min(176px, 100%); aspect-ratio: 1; margin: 20px auto;
+  display: grid; place-items: center; position: relative;
+}
+.auto-start-ring::before {
+  content: ""; position: absolute; inset: 0; border-radius: 50%;
+  background: conic-gradient(var(--accent) var(--auto-start-progress, 100%), var(--border-strong) 0);
+  mask: radial-gradient(farthest-side, transparent calc(100% - 9px), #000 calc(100% - 8px));
+}
+.auto-start-ring h3 { font-size: 18px; }
+.auto-start-seconds { margin-top: 4px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
 
 /* ---------- Toast ---------- */
 .toast-stack {

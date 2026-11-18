@@ -1,11 +1,11 @@
 @echo off
 chcp 65001 >nul
-title Build Jiansz
+title 打包简小松
 
 cd /d "%~dp0"
 
 echo ========================================
-echo Build Jiansz
+echo 打包简小松
 echo ========================================
 echo.
 
@@ -80,13 +80,23 @@ if errorlevel 1 goto BUILD_FAIL
 echo.
 echo [6/6] Copying release files...
 
+set "JIANSZ_CSC=%SystemRoot%\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+if exist "%JIANSZ_CSC%" (
+    "%JIANSZ_CSC%" /nologo /target:exe /optimize+ /codepage:65001 "/out:%CD%\dist\Jiansz\Jiansz-Daily.exe" "%CD%\scripts\JianszDaily.cs"
+    if errorlevel 1 goto BUILD_FAIL
+)
+
 if exist "README.md" copy /Y "README.md" "dist\Jiansz\README.md" >nul
 if exist "USER_GUIDE.md" copy /Y "USER_GUIDE.md" "dist\Jiansz\USER_GUIDE.md" >nul
 if exist "FAQ.md" copy /Y "FAQ.md" "dist\Jiansz\FAQ.md" >nul
 if exist "CHANGELOG.md" copy /Y "CHANGELOG.md" "dist\Jiansz\CHANGELOG.md" >nul
 if exist "LICENSE" copy /Y "LICENSE" "dist\Jiansz\LICENSE" >nul
 
-if exist "docs" xcopy /E /I /Y "docs" "dist\Jiansz\docs" >nul
+if exist "docs" (
+    xcopy /E /I /Y "docs" "dist\Jiansz\docs" >nul
+    if not exist "dist\Jiansz\assets\banner" mkdir "dist\Jiansz\assets\banner"
+    copy /Y "assets\banner\banner.jpg" "dist\Jiansz\assets\banner\banner.jpg" >nul
+)
 
 echo.
 echo ========================================
